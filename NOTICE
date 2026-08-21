@@ -1,0 +1,51 @@
+Rakitsu — Build, debug, and ship agentic AI systems with a visual builder
+Copyright (c) 2026 Sakaki Natan & Paulus Ery Wasito Adhi (paupawsan)
+
+This product is licensed under the Business Source License 1.1.
+See the LICENSE file for the full terms.
+
+The license converts to Apache License, Version 2.0 on the Change Date:
+four years from the date each version of the Licensed Work is first
+publicly distributed.
+
+For commercial licensing arrangements outside the Additional Use Grant,
+contact the Licensors via the project repository.
+
+---
+
+Third-party components and their respective licenses:
+
+Go runtime dependencies:
+- Cobra (Apache 2.0)                      — https://github.com/spf13/cobra
+- Viper (MIT)                             — https://github.com/spf13/viper
+- Bubble Tea (MIT)                        — https://github.com/charmbracelet/bubbletea
+- Lip Gloss (MIT)                         — https://github.com/charmbracelet/lipgloss
+- Glamour (MIT)                           — https://github.com/charmbracelet/glamour
+- Bubbles (MIT)                           — https://github.com/charmbracelet/bubbles
+- Anthropic SDK for Go (MIT)              — https://github.com/anthropics/anthropic-sdk-go
+- go-openai (Apache 2.0)                  — https://github.com/sashabaranov/go-openai
+- Google GenAI SDK (Apache 2.0)           — https://github.com/googleapis/go-genai
+- tiktoken-go (MIT)                       — https://github.com/pkoukk/tiktoken-go
+- gorilla/websocket (BSD-2-Clause)        — https://github.com/gorilla/websocket
+- google/uuid (BSD-3-Clause)              — https://github.com/google/uuid
+- yaml.v3 (MIT / Apache 2.0)              — https://github.com/go-yaml/yaml
+- golang.org/x/* (BSD-3-Clause)           — https://pkg.go.dev/golang.org/x
+
+Frontend dependencies:
+- Vue 3 (MIT)                             — https://github.com/vuejs/core
+- Vite (MIT)                              — https://github.com/vitejs/vite
+- TypeScript (Apache 2.0)                 — https://github.com/microsoft/TypeScript
+- Vue Flow (MIT)                          — https://github.com/bcakmakoglu/vue-flow
+- elkjs (EPL-2.0)                         — https://github.com/kieler/elkjs
+- @dagrejs/dagre (MIT)                    — https://github.com/dagrejs/dagre
+- js-yaml (MIT)                           — https://github.com/nodeca/js-yaml
+- yaml (ISC)                              — https://github.com/eemeli/yaml
+- jszip (MIT / GPL-3.0 dual)              — https://github.com/Stuk/jszip
+
+See go.mod and web/package.json for the complete dependency list including
+transitive dependencies. Each dependency retains its own license terms.
+
+---
+
+The Business Source License is a trademark of MariaDB Corporation Ab.
+License text copyright (c) 2020 MariaDB Corporation Ab, All Rights Reserved.
