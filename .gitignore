@@ -1,0 +1,98 @@
+# Binaries
+/rakitsu
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Build artifacts
+dist/
+web/dist/
+internal/webui/dist/
+
+# Test artifacts
+*.test
+*.out
+coverage.txt
+
+# Go workspace
+go.work
+go.work.sum
+
+# Claude Code
+.claude/
+
+# Git worktrees
+.worktrees/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+*.env
+
+# MCP config (contains local paths)
+.mcp.json
+
+# Local security patterns for release-sync scan (contains private fingerprints)
+.security-patterns.local
+
+# Credentials / service account keys
+**/gemini-keys/
+*.json.key
+service-account*.json
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+
+# Scratch / analysis
+analysis/
+list_md.py
+pyproject.toml
+uv.lock
+.venv/
+tests/
+test/workspace/
+
+# Stray frontend files (not part of project)
+web/src/router/
+web/src/components/Dashboard.vue
+web/src/components/DashboardCard.vue
+
+# Node modules
+node_modules/
+web/node_modules/
+
+# webui probe artifacts
+test/webui/node_modules/
+test/webui/artifacts/
+test/webui/package-lock.json
+
+# Stray probe artifacts dumped at repo root (when scripts run from wrong cwd)
+/artifacts/
+
+# Superpowers SDD scratch (progress ledger, briefs) — local only
+.superpowers/
+
+# WHOA launch-asset raw recordings — large binaries, never committed.
+# The script + config + session JSONL receipts under this dir DO get
+# committed; only the video files are excluded.
+docs/internal/assets/launch/*.mov
+docs/internal/assets/launch/*.mp4
