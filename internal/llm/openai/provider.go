@@ -1,0 +1,522 @@
+// Package openai provides an OpenAI implementation of the LLM provider interface.
+package openai
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+
+	"github.com/paupawsan/rakitsu/internal/llm"
+	"github.com/paupawsan/rakitsu/internal/llm/format"
+	openai "github.com/sashabaranov/go-openai"
+)
+
+// Provider implements the LLMProvider interface for OpenAI and compatible APIs
+type Provider struct {
+	client              *openai.Client
+	model               string
+	name                string
+	config              *llm.ProviderConfig
+	formatAdapter       format.ResponseFormat // pluggable response-format handler
+	formatResolveReason string                // "pattern_match" | "override" | "fallback"
+	formatResolver      string                // "registry" | "sniffing"
+}
+
+// headerTransport injects custom HTTP headers into every request.
+type headerTransport struct {
+	base    http.RoundTripper
+	headers map[string]string
+}
+
+func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	for k, v := range t.headers {
+		req.Header.Set(k, v)
+	}
+	return t.base.RoundTrip(req)
+}
+
+// NewProvider creates a new OpenAI provider.
+// Supports custom BaseURL for OpenAI-compatible APIs (e.g., Ollama, LiteLLM).
+func NewProvider(config *llm.ProviderConfig) *Provider {
+	clientConfig := openai.DefaultConfig(config.APIKey)
+	if config.BaseURL != "" {
+		clientConfig.BaseURL = config.BaseURL
+	}
+
+	// Inject X-LiteLLM-Timeout header if timeout is configured
+	if config.TimeoutSec > 0 {
+		clientConfig.HTTPClient = &http.Client{
+			Transport: &headerTransport{
+				base: http.DefaultTransport,
+				headers: map[string]string{
+					"X-LiteLLM-Timeout": strconv.Itoa(config.TimeoutSec),
+				},
+			},
+		}
+	}
+
+	client := openai.NewClientWithConfig(clientConfig)
+
+	name := "openai"
+	if config.BaseURL != "" {
+		name = "openai-compatible"
+	}
+
+	// Resolve the response-format adapter once per provider instance.
+	// Detection order: config override → model-name pattern → Sniffing fallback.
+	// Known reasoning models (nemotron, deepseek-r1, qwq) auto-map to
+	// ReasoningContentField; unknown models get Sniffing which commits to the
+	// right inner adapter based on the first few streaming deltas.
+	detect := format.DetectWithReason(config.Model, config.ResponseFormat)
+
+	return &Provider{
+		client:              client,
+		model:               config.Model,
+		name:                name,
+		config:              config,
+		formatAdapter:       detect.Adapter,
+		formatResolveReason: detect.Reason,
+		formatResolver:      detect.Resolver,
+	}
+}
+
+// Generate sends a request to OpenAI and returns the response
+func (p *Provider) Generate(
+	ctx context.Context,
+	systemPrompt string,
+	history []llm.Message,
+	tools []llm.ToolDefinition,
+) (*llm.GenerateResult, error) {
+	return p.generate(ctx, systemPrompt, history, tools, llm.OverrideConfig{})
+}
+
+// GenerateWithOverride implements llm.OverrideAware so the debug controller
+// can experiment with sampling parameters mid-run.
+func (p *Provider) GenerateWithOverride(
+	ctx context.Context,
+	systemPrompt string,
+	history []llm.Message,
+	tools []llm.ToolDefinition,
+	override llm.OverrideConfig,
+) (*llm.GenerateResult, error) {
+	return p.generate(ctx, systemPrompt, history, tools, override)
+}
+
+func (p *Provider) generate(
+	ctx context.Context,
+	systemPrompt string,
+	history []llm.Message,
+	tools []llm.ToolDefinition,
+	override llm.OverrideConfig,
+) (*llm.GenerateResult, error) {
+	// Build messages for the API
+	messages := p.buildMessages(systemPrompt, history)
+
+	// Build tools for the API
+	var toolDefs []openai.Tool
+	if len(tools) > 0 {
+		toolDefs = p.buildTools(tools)
+	}
+
+	model := p.model
+	if override.Model != nil && *override.Model != "" {
+		model = *override.Model
+	}
+
+	// Create the request
+	req := openai.ChatCompletionRequest{
+		Model:    model,
+		Messages: messages,
+		Tools:    toolDefs,
+	}
+
+	// Set optional parameters (override wins, falls back to config). An
+	// explicit override is applied even when it's zero (e.g. temperature: 0
+	// for deterministic output) — only the config-default path falls back
+	// to the API default via the > 0 check.
+	temperature := p.config.Temperature
+	hasTempOverride := false
+	if override.Temperature != nil {
+		temperature = *override.Temperature
+		hasTempOverride = true
+	}
+	if hasTempOverride || temperature > 0 {
+		req.Temperature = float32(temperature)
+	}
+
+	maxTokens := p.config.MaxTokens
+	if override.MaxTokens != nil {
+		maxTokens = *override.MaxTokens
+	}
+	if maxTokens > 0 {
+		req.MaxTokens = maxTokens
+	}
+
+	topP := p.config.TopP
+	hasTopPOverride := false
+	if override.TopP != nil {
+		topP = *override.TopP
+		hasTopPOverride = true
+	}
+	if hasTopPOverride || topP > 0 {
+		req.TopP = float32(topP)
+	}
+
+	// Call the API
+	resp, err := p.client.CreateChatCompletion(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("openai API error: %w", err)
+	}
+
+	// Parse the response
+	return p.parseResponse(&resp)
+}
+
+// GetName returns the provider name
+func (p *Provider) GetName() string {
+	return p.name
+}
+
+// GetModel returns the model being used
+func (p *Provider) GetModel() string {
+	return p.model
+}
+
+// buildMessages converts our message format to OpenAI's format
+func (p *Provider) buildMessages(systemPrompt string, history []llm.Message) []openai.ChatCompletionMessage {
+	messages := make([]openai.ChatCompletionMessage, 0, len(history)+1)
+
+	// Add system prompt
+	if systemPrompt != "" {
+		messages = append(messages, openai.ChatCompletionMessage{
+			Role:    openai.ChatMessageRoleSystem,
+			Content: systemPrompt,
+		})
+	}
+
+	// Add history
+	for _, msg := range history {
+		messages = append(messages, p.convertMessage(msg))
+	}
+
+	return messages
+}
+
+// convertMessage converts our message format to OpenAI's format
+func (p *Provider) convertMessage(msg llm.Message) openai.ChatCompletionMessage {
+	om := openai.ChatCompletionMessage{
+		Role: msg.Role,
+	}
+
+	// Handle tool response messages
+	if msg.Role == "tool" {
+		om.Role = openai.ChatMessageRoleTool
+		om.Content = msg.AsText()
+		om.ToolCallID = msg.ToolCallID
+		return om
+	}
+
+	// Handle messages with tool calls
+	if len(msg.ToolCalls) > 0 {
+		om.ToolCalls = make([]openai.ToolCall, len(msg.ToolCalls))
+		for i, tc := range msg.ToolCalls {
+			argsJSON, _ := json.Marshal(tc.Arguments)
+			om.ToolCalls[i] = openai.ToolCall{
+				ID:   tc.ID,
+				Type: openai.ToolTypeFunction,
+				Function: openai.FunctionCall{
+					Name:      tc.Name,
+					Arguments: string(argsJSON),
+				},
+			}
+		}
+	}
+
+	// Text-only messages (the common case, and the only shape assistant/tool
+	// messages ever take today) keep the plain Content string — go-openai's
+	// ChatCompletionMessage.MarshalJSON errors if both Content and
+	// MultiContent are set, so leaving MultiContent nil here is required.
+	if !msg.HasNonTextContent() {
+		om.Content = msg.AsText()
+		return om
+	}
+
+	// A user message carrying non-text content (e.g. --attach images) goes
+	// through MultiContent instead.
+	om.MultiContent = make([]openai.ChatMessagePart, 0, len(msg.Content))
+	for _, b := range msg.Content {
+		switch b.Type {
+		case llm.ContentTypeText:
+			om.MultiContent = append(om.MultiContent, openai.ChatMessagePart{
+				Type: openai.ChatMessagePartTypeText,
+				Text: b.Text,
+			})
+		case llm.ContentTypeImage:
+			om.MultiContent = append(om.MultiContent, openai.ChatMessagePart{
+				Type: openai.ChatMessagePartTypeImageURL,
+				ImageURL: &openai.ChatMessageImageURL{
+					URL: "data:" + b.MIMEType + ";base64," + b.Source.Base64,
+				},
+			})
+		}
+	}
+	return om
+}
+
+// buildTools converts our tool definitions to OpenAI's format
+func (p *Provider) buildTools(tools []llm.ToolDefinition) []openai.Tool {
+	result := make([]openai.Tool, len(tools))
+	for i, tool := range tools {
+		result[i] = openai.Tool{
+			Type: openai.ToolTypeFunction,
+			Function: &openai.FunctionDefinition{
+				Name:        tool.Name,
+				Description: tool.Description,
+				Parameters:  tool.Parameters,
+			},
+		}
+	}
+	return result
+}
+
+// GenerateStream implements StreamingProvider for token-level output.
+func (p *Provider) GenerateStream(
+	ctx context.Context,
+	systemPrompt string,
+	history []llm.Message,
+	tools []llm.ToolDefinition,
+) (*llm.StreamResult, error) {
+	messages := p.buildMessages(systemPrompt, history)
+
+	var toolDefs []openai.Tool
+	if len(tools) > 0 {
+		toolDefs = p.buildTools(tools)
+	}
+
+	req := openai.ChatCompletionRequest{
+		Model:    p.model,
+		Messages: messages,
+		Tools:    toolDefs,
+		Stream:   true,
+		StreamOptions: &openai.StreamOptions{
+			IncludeUsage: true,
+		},
+	}
+	if p.config.Temperature > 0 {
+		req.Temperature = float32(p.config.Temperature)
+	}
+	if p.config.MaxTokens > 0 {
+		req.MaxTokens = p.config.MaxTokens
+	}
+	if p.config.TopP > 0 {
+		req.TopP = float32(p.config.TopP)
+	}
+
+	stream, err := p.client.CreateChatCompletionStream(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("openai stream error: %w", err)
+	}
+
+	chunksCh := make(chan llm.StreamChunk, 64)
+	finalCh := make(chan *llm.GenerateResult, 1)
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer close(chunksCh)
+		defer close(finalCh)
+		defer close(errCh)
+		defer stream.Close()
+
+		// All delta handling goes through the pluggable ResponseFormat adapter.
+		// The adapter knows how to extract content/reasoning/tool-calls from
+		// whatever shape this model emits (standard OpenAI, reasoning_content
+		// field for Nemotron/DeepSeek, etc). See internal/llm/format/.
+		state := format.NewState()
+		// B54: peer-emit reasoning bytes extracted at stream time by ThinkTagInline
+		// (inline <think>...</think> shape). The other shape (delta.reasoning_content
+		// field) is handled below; both converge on StreamChunk.Reasoning so
+		// downstream telemetry (EventReasoningChunk) sees one unified channel.
+		state.OnReasoningDelta = func(reasoning string) {
+			chunksCh <- llm.StreamChunk{Reasoning: reasoning}
+		}
+		var streamUsage *llm.TokenUsage
+
+		for {
+			resp, err := stream.Recv()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				errCh <- fmt.Errorf("openai stream recv: %w", err)
+				return
+			}
+
+			// Capture usage from final chunk (stream_options.include_usage).
+			// Per the OpenAI streaming spec, that final chunk carries an
+			// EMPTY Choices slice and ONLY Usage populated, so this must run
+			// before the empty-choices continue below or it's never reached.
+			if resp.Usage != nil && resp.Usage.TotalTokens > 0 {
+				streamUsage = &llm.TokenUsage{
+					InputTokens:  resp.Usage.PromptTokens,
+					OutputTokens: resp.Usage.CompletionTokens,
+					TotalTokens:  resp.Usage.TotalTokens,
+				}
+			}
+
+			if len(resp.Choices) == 0 {
+				continue
+			}
+			rawDelta := convertOpenAIDelta(resp.Choices[0].Delta, resp.Choices[0].FinishReason)
+
+			surface := p.formatAdapter.ApplyDelta(state, rawDelta)
+			if surface != "" {
+				chunksCh <- llm.StreamChunk{Text: surface}
+			}
+
+			// Phase 6 / Claim 2 fix: surface reasoning_content as its own
+			// stream channel. The format adapter consumes it silently into
+			// state.Reasoning (so it doesn't pollute the answer surface);
+			// without this peer emit, the entire reasoning phase of a
+			// reasoning model is invisible to the agent loop, the tracer,
+			// the SSE hub, and every UI consumer. See
+			// docs/internal/POSITIONING-AUDIT.md Claim 1-2 (2026-05-12).
+			if rawDelta.ReasoningContent != "" {
+				chunksCh <- llm.StreamChunk{Reasoning: rawDelta.ReasoningContent}
+			}
+		}
+
+		result := p.formatAdapter.Finalize(state)
+
+		// Send done chunk
+		chunksCh <- llm.StreamChunk{Done: true}
+
+		finalCh <- &llm.GenerateResult{
+			Response:        result.Content,
+			ToolCalls:       result.ToolCalls,
+			FinishReason:    result.FinishReason,
+			TokenUsage:      streamUsage,
+			ThinkingContent: result.Reasoning,
+			FormatInfo:      p.buildFormatInfo(state),
+			Salvaged:        result.Salvaged,
+		}
+	}()
+
+	return &llm.StreamResult{
+		Chunks: chunksCh,
+		Final:  finalCh,
+		Err:    errCh,
+	}, nil
+}
+
+// parseResponse converts OpenAI's response to our format
+func (p *Provider) parseResponse(resp *openai.ChatCompletionResponse) (*llm.GenerateResult, error) {
+	if len(resp.Choices) == 0 {
+		return nil, fmt.Errorf("no response choices returned")
+	}
+
+	choice := resp.Choices[0]
+
+	// Extract structured tool calls up front so the adapter can receive them
+	// via RawMessage. (Quirk #3 migration: the old reasoning_content re-marshal
+	// fallback is now handled by the ReasoningContentField adapter.)
+	var toolCalls []llm.ToolCall
+	if len(choice.Message.ToolCalls) > 0 {
+		toolCalls = make([]llm.ToolCall, len(choice.Message.ToolCalls))
+		for i, tc := range choice.Message.ToolCalls {
+			var args map[string]interface{}
+			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+				return nil, fmt.Errorf("openai: parsing tool call arguments for %s: %w", tc.Function.Name, err)
+			}
+			toolCalls[i] = llm.ToolCall{
+				ID:        tc.ID,
+				Name:      tc.Function.Name,
+				Arguments: llm.NormalizeArgKeys(args),
+			}
+		}
+	}
+
+	// Delegate content/reasoning extraction to the adapter. This replaces the
+	// old ad-hoc reasoning_content JSON re-marshal fallback.
+	state := format.NewState()
+	p.formatAdapter.ApplyFull(state, format.RawMessage{
+		Content:          choice.Message.Content,
+		ReasoningContent: choice.Message.ReasoningContent,
+		ToolCalls:        toolCalls,
+		FinishReason:     string(choice.FinishReason),
+	})
+	adapted := p.formatAdapter.Finalize(state)
+
+	result := &llm.GenerateResult{
+		Response:        adapted.Content,
+		ToolCalls:       adapted.ToolCalls,
+		FinishReason:    adapted.FinishReason,
+		ThinkingContent: adapted.Reasoning,
+		FormatInfo:      p.buildFormatInfo(state),
+		Salvaged:        adapted.Salvaged,
+	}
+
+	// Add token usage
+	result.TokenUsage = &llm.TokenUsage{
+		InputTokens:  resp.Usage.PromptTokens,
+		OutputTokens: resp.Usage.CompletionTokens,
+		TotalTokens:  resp.Usage.TotalTokens,
+	}
+
+	return result, nil
+}
+
+// buildFormatInfo produces the FormatInfo attached to every GenerateResult,
+// so downstream consumers (telemetry, tracer, UI debugger) can see which
+// response-format adapter actually handled the request. For Sniffing, the
+// committed inner adapter is reported and the reason is upgraded to
+// "sniff_commit" because the final decision was runtime, not registry.
+// For composed wrapping adapters (ThinkTagInline{Inner: ReasoningContentField{}},
+// etc.) the full chain is reported via format.ChainName so operators see the
+// complete pipeline instead of just the outermost wrapper.
+func (p *Provider) buildFormatInfo(state *format.FormatState) *llm.FormatInfo {
+	adapterName := format.ChainName(p.formatAdapter)
+	reason := p.formatResolveReason
+	if sniff, ok := p.formatAdapter.(format.Sniffing); ok {
+		committed := sniff.CommittedName(state)
+		if committed != "" && committed != "sniffing_pending" {
+			adapterName = committed
+			reason = "sniff_commit"
+		}
+	}
+	return &llm.FormatInfo{
+		Adapter:  adapterName,
+		Reason:   reason,
+		Resolved: p.formatResolver,
+	}
+}
+
+// convertOpenAIDelta converts a go-openai streaming delta into the generic
+// format.RawDelta shape that adapters consume. Centralizes the library-specific
+// field-name translation in one place.
+func convertOpenAIDelta(d openai.ChatCompletionStreamChoiceDelta, finishReason openai.FinishReason) format.RawDelta {
+	raw := format.RawDelta{
+		Content:          d.Content,
+		ReasoningContent: d.ReasoningContent,
+		FinishReason:     string(finishReason),
+	}
+	if len(d.ToolCalls) > 0 {
+		raw.ToolCalls = make([]format.RawDeltaToolCall, 0, len(d.ToolCalls))
+		for _, tc := range d.ToolCalls {
+			idx := 0
+			if tc.Index != nil {
+				idx = *tc.Index
+			}
+			raw.ToolCalls = append(raw.ToolCalls, format.RawDeltaToolCall{
+				Index:     idx,
+				ID:        tc.ID,
+				Name:      tc.Function.Name,
+				Arguments: tc.Function.Arguments,
+			})
+		}
+	}
+	return raw
+}
