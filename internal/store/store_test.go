@@ -600,6 +600,55 @@ func TestGetSessionListSessions_ConcurrentWithWrites_NoCorruptIndexRead(t *testi
 	wg.Wait()
 }
 
+// TestDeleteSession_CheckpointNotRecreatedByRacingWriteCheckpoint regression-
+// guards against DeleteSession's checkpoint-file removal running unlocked,
+// where a WriteCheckpoint call could complete entirely inside that window
+// and recreate the file for a session that's mid-deletion, orphaning it
+// with no index entry pointing at it. Many independent trials, each racing
+// one WriteCheckpoint against one DeleteSession for a fresh session, to
+// give the timing-dependent window many chances to manifest.
+func TestDeleteSession_CheckpointNotRecreatedByRacingWriteCheckpoint(t *testing.T) {
+	const trials = 200
+	recreated := 0
+	for i := 0; i < trials; i++ {
+		s := newTestStore(t)
+		id := startTestSession(t, s)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = s.WriteCheckpoint(StoreCheckpointData{
+				SessionID:      id,
+				CompletedSteps: []string{"step"},
+				Results:        map[string]StoreStepResult{},
+			})
+		}()
+		go func() {
+			defer wg.Done()
+			if err := s.DeleteSession(id); err != nil {
+				t.Errorf("trial %d: DeleteSession: %v", i, err)
+			}
+		}()
+		wg.Wait()
+
+		if s.HasCheckpoint(id) {
+			recreated++
+		}
+	}
+	// A handful of survivals are expected and not a bug: when the single
+	// WriteCheckpoint call happens to finish strictly after DeleteSession
+	// already returned, the file legitimately exists again (a caller
+	// checkpointing an already-deleted session is a separate, out-of-scope
+	// concern — see the fix's issue). The bug this guards against is the
+	// checkpoint surviving on essentially *every* trial, because the old
+	// code's unlocked removal window let a racing write win far more often
+	// than genuine sequencing-after would predict.
+	if recreated > trials/4 {
+		t.Errorf("checkpoint file survived DeleteSession in %d/%d trials — expected only occasional legitimate write-after-delete, not this many; the removal likely isn't properly locked against WriteCheckpoint", recreated, trials)
+	}
+}
+
 func copyResults(m map[string]StoreStepResult) map[string]StoreStepResult {
 	out := make(map[string]StoreStepResult, len(m))
 	for k, v := range m {

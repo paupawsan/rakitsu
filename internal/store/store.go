@@ -371,28 +371,40 @@ func (s *SessionStore) DeleteSession(id string) error {
 		return fmt.Errorf("invalid session id")
 	}
 
-	// Remove JSONL file
+	// Remove JSONL file. Unlocked: nothing writes new content to an already-
+	// ended session's .jsonl after EndSession finishes, so there's no
+	// concurrent writer to race here.
 	path := filepath.Join(s.dir, id+".jsonl")
 	os.Remove(path)
 
-	// Remove checkpoint file if present (best-effort)
-	os.Remove(filepath.Join(s.dir, id+".checkpoint.json"))
-
 	// Remove chat tree blob if present (best-effort) — like the checkpoint
-	// file, this is an out-of-band artifact keyed by session id that isn't
-	// tracked in the JSONL or index, and would otherwise be left orphaned
-	// on disk forever once the session itself is deleted.
+	// file below, this is an out-of-band artifact keyed by session id that
+	// isn't tracked in the JSONL or index, and would otherwise be left
+	// orphaned on disk forever once the session itself is deleted.
+	// Unlocked, and stays that way: SaveChatTree is deliberately lock-free
+	// (its own doc comment — safe to call from any goroutine, independent
+	// of the JSONL lifecycle) so a delete racing a concurrent SaveChatTree
+	// for the same id can still leave a recreated .chat.json behind. s.mu
+	// is a single store-wide mutex; making SaveChatTree take it to close
+	// this would serialize every concurrent chat-tree save across every
+	// live session, not just this one — out of scope for this fix.
 	if chatPath, err := s.chatTreePath(id); err == nil {
 		os.Remove(chatPath)
 	}
 
-	// Update index. Locked so this read-modify-write of sessions.json can't
-	// race a concurrent StartSession/EndSession (which mutate the same file
-	// under s.mu via appendToIndex/updateIndex) or a concurrent
-	// DeleteSession — without the lock, two overlapping read-modify-writes
-	// can lose one side's update.
+	// Update index and remove the checkpoint file. Both locked so they're
+	// properly serialized against a concurrent StartSession/EndSession
+	// (which mutate sessions.json under s.mu via appendToIndex/updateIndex),
+	// a concurrent DeleteSession, and — for the checkpoint file specifically
+	// — a concurrent WriteCheckpoint (same mutex, held for its whole body).
+	// Without holding the lock across the checkpoint removal too, a
+	// WriteCheckpoint racing in the window between an unlocked os.Remove and
+	// this Lock() call could recreate the file for a session that's mid-
+	// deletion, orphaning it with no index entry pointing at it.
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	os.Remove(filepath.Join(s.dir, id+".checkpoint.json"))
 
 	sessions, err := s.readIndex()
 	if err != nil {
