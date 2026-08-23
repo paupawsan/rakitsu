@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/paupawsan/rakitsu/internal/config"
 	"github.com/paupawsan/rakitsu/internal/llm"
@@ -239,11 +240,25 @@ func (cm *ContextMonitor) buildAuto(stepLog *StepLog, rawHistory []llm.Message) 
 	}
 }
 
+// truncateUTF8 truncates s to at most maxBytes bytes, snapping backward to the
+// nearest rune boundary so the result is always valid UTF-8. A byte-offset
+// slice like s[:n] can otherwise land mid-codepoint and corrupt the string.
+func truncateUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
+}
+
 // SanitizeOutput applies fencing and truncation to a tool output before it enters the LLM context.
 func (cm *ContextMonitor) SanitizeOutput(toolName, callID, output string) string {
 	// Truncate first (before fencing, so fence markers aren't counted toward limit)
 	if cm.maxToolOutput > 0 && len(output) > cm.maxToolOutput {
-		output = output[:cm.maxToolOutput] + fmt.Sprintf("\n... [truncated, %d chars omitted]", len(output)-cm.maxToolOutput)
+		truncated := truncateUTF8(output, cm.maxToolOutput)
+		output = truncated + fmt.Sprintf("\n... [truncated, %d chars omitted]", len(output)-len(truncated))
 	}
 
 	// Fence
@@ -279,32 +294,49 @@ func (cm *ContextMonitor) buildSlidingWindow(rawHistory []llm.Message) []llm.Mes
 		return rawHistory
 	}
 
-	// Find turn boundaries: each turn starts with an assistant message
+	// Find turn boundaries: each turn spans from just after the previous
+	// turn (or the query) through an assistant message and its trailing
+	// tool messages. Anchoring start at prevEnd — rather than at the
+	// assistant index itself — folds in any standalone message preceding
+	// that assistant reply (e.g. a retry/corrective "user" message injected
+	// mid-loop) instead of silently dropping it.
 	type turn struct {
 		start, end int // indices into rawHistory
 	}
 	var turns []turn
-	for i := 0; i < len(rawHistory); i++ {
+	prevEnd := 1 // index 0 is the user query, handled separately below
+	for i := 1; i < len(rawHistory); i++ {
 		if rawHistory[i].Role == "assistant" {
-			t := turn{start: i, end: i + 1}
+			t := turn{start: prevEnd, end: i + 1}
 			// Include following tool messages
 			for t.end < len(rawHistory) && rawHistory[t.end].Role == "tool" {
 				t.end++
 			}
 			turns = append(turns, t)
+			prevEnd = t.end
 			i = t.end - 1 // skip past tool messages
 		}
+	}
+	// A trailing corrective message with no assistant reply yet (e.g. the
+	// directive injected right before the next retry) has no turn of its
+	// own — capture it as a final turn so it isn't dropped.
+	if prevEnd < len(rawHistory) {
+		turns = append(turns, turn{start: prevEnd, end: len(rawHistory)})
 	}
 
 	// Keep the first message (user query) + last N turns worth of messages
 	result := []llm.Message{rawHistory[0]} // user query
 
-	// Calculate how many turns fit in the window
+	// Calculate how many turns fit in the window. The single most recent
+	// turn is always admitted regardless of budget — otherwise a turn
+	// alone larger than windowSize (e.g. many parallel tool results in one
+	// iteration) would break out before keepFrom ever advances, discarding
+	// the entire conversation instead of keeping a partial window.
 	msgCount := 1 // the query
 	keepFrom := len(turns)
 	for i := len(turns) - 1; i >= 0; i-- {
 		turnMsgs := turns[i].end - turns[i].start
-		if msgCount+turnMsgs > cm.windowSize {
+		if i != len(turns)-1 && msgCount+turnMsgs > cm.windowSize {
 			break
 		}
 		msgCount += turnMsgs

@@ -1450,19 +1450,24 @@ func (a *Agent) judgeDeadEnd(ctx context.Context, history []llm.Message, iterati
 	if strings.TrimSpace(verdict) == "" {
 		verdict = result.ThinkingContent
 	}
-	upper := strings.ToUpper(verdict)
-	if !strings.Contains(upper, "DEAD_END") {
+	// Match and slice directly on verdict (never on a strings.ToUpper copy):
+	// ToUpper can change a string's byte length (e.g. 'ɐ' U+0250 -> 'Ɑ'
+	// U+2C6D grows by a byte), so an index found in the uppercased copy can
+	// land past the end of — or mid-rune inside — the original, byte-for-byte
+	// different verdict string. A case-insensitive regex on verdict itself
+	// finds "DEAD_END" and slices from a position that's always valid there.
+	deadEndRe := regexp.MustCompile(`(?i)DEAD_END`)
+	loc := deadEndRe.FindStringIndex(verdict)
+	if loc == nil {
 		return false, "", tokIn, tokOut
 	}
 	reason = "the LLM self-judge flagged the step as a dead end"
-	if idx := strings.Index(upper, "DEAD_END"); idx >= 0 {
-		tail := strings.TrimLeft(strings.TrimSpace(verdict[idx+len("DEAD_END"):]), "—-: ")
-		if nl := strings.IndexByte(tail, '\n'); nl >= 0 {
-			tail = tail[:nl]
-		}
-		if tail = strings.TrimSpace(tail); tail != "" {
-			reason = "LLM self-judge: " + tail
-		}
+	tail := strings.TrimLeft(strings.TrimSpace(verdict[loc[1]:]), "—-: ")
+	if nl := strings.IndexByte(tail, '\n'); nl >= 0 {
+		tail = tail[:nl]
+	}
+	if tail = strings.TrimSpace(tail); tail != "" {
+		reason = "LLM self-judge: " + tail
 	}
 	return true, reason, tokIn, tokOut
 }
@@ -1895,11 +1900,18 @@ func (a *Agent) executeTool(ctx context.Context, call llm.ToolCall) (string, err
 	return a.toolRegistry.ExecuteToolCall(ctx, toolCall)
 }
 
-// convertToolCalls converts LLM tool calls to telemetry format
+// convertToolCalls converts LLM tool calls to telemetry format. Carries the
+// call's ID through so a replay-reconstructed history (see
+// internal/debug/replay.go) can round-trip it into the assistant message's
+// llm.ToolCall — without it, the corresponding tool-role response message's
+// ToolCallID has nothing matching in the preceding assistant message, which
+// breaks providers (OpenAI, Anthropic) that require every tool-role
+// message's tool_call_id to match an id in that assistant turn's tool_calls.
 func (a *Agent) convertToolCalls(calls []llm.ToolCall) []telemetry.ToolCallSignature {
 	result := make([]telemetry.ToolCallSignature, len(calls))
 	for i, call := range calls {
 		result[i] = telemetry.ToolCallSignature{
+			ID:        call.ID,
 			Name:      call.Name,
 			Arguments: call.Arguments,
 		}

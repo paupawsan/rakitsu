@@ -224,16 +224,31 @@ func (s *SessionStore) ListSessions() ([]SessionMeta, error) {
 	return sessions, nil
 }
 
-// GetSession returns metadata for a single session.
+// GetSession returns metadata for a single session. Applies the same
+// orphaned-"running"-session reclassification as ListSessions, so a session
+// left "running" by a crashed process (any session ID other than the
+// current active one) reports as stale here too, instead of GetSession and
+// ListSessions disagreeing about the same session's status.
 func (s *SessionStore) GetSession(id string) (*SessionMeta, error) {
 	sessions, err := s.readIndex()
 	if err != nil {
 		return nil, err
 	}
 
+	s.mu.Lock()
+	currentID := ""
+	if s.current != nil {
+		currentID = s.current.ID
+	}
+	s.mu.Unlock()
+
 	for i := range sessions {
 		if sessions[i].ID == id {
-			return &sessions[i], nil
+			meta := sessions[i]
+			if meta.Status == SessionRunning && meta.ID != currentID {
+				meta.Status = SessionStale
+			}
+			return &meta, nil
 		}
 	}
 	return nil, fmt.Errorf("session not found: %s", id)
@@ -332,7 +347,8 @@ func (s *SessionStore) updateIndex(meta SessionMeta) error {
 	return s.writeIndex(sessions)
 }
 
-// DeleteSession removes a session, its JSONL file, and checkpoint file.
+// DeleteSession removes a session, its JSONL file, checkpoint file, and chat
+// tree blob.
 func (s *SessionStore) DeleteSession(id string) error {
 	// Sanitize the id to prevent path traversal
 	if strings.ContainsAny(id, "/\\..") {
@@ -346,7 +362,22 @@ func (s *SessionStore) DeleteSession(id string) error {
 	// Remove checkpoint file if present (best-effort)
 	os.Remove(filepath.Join(s.dir, id+".checkpoint.json"))
 
-	// Update index
+	// Remove chat tree blob if present (best-effort) — like the checkpoint
+	// file, this is an out-of-band artifact keyed by session id that isn't
+	// tracked in the JSONL or index, and would otherwise be left orphaned
+	// on disk forever once the session itself is deleted.
+	if chatPath, err := s.chatTreePath(id); err == nil {
+		os.Remove(chatPath)
+	}
+
+	// Update index. Locked so this read-modify-write of sessions.json can't
+	// race a concurrent StartSession/EndSession (which mutate the same file
+	// under s.mu via appendToIndex/updateIndex) or a concurrent
+	// DeleteSession — without the lock, two overlapping read-modify-writes
+	// can lose one side's update.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	sessions, err := s.readIndex()
 	if err != nil {
 		return err
@@ -447,6 +478,13 @@ type StoreStepResult struct {
 
 // WriteCheckpoint atomically writes (or overwrites) the checkpoint file for the
 // current session. Safe to call after every pipeline step.
+//
+// Held for the whole write, not just the s.current.ID read: multiple
+// pipeline steps can call this concurrently for the same session, and they
+// all share the same ".tmp" path (see below), so without the lock two
+// overlapping writes could stomp on each other's tmp file before either
+// rename runs. This also serializes against DeleteSession, which now takes
+// s.mu around its own checkpoint-file removal.
 func (s *SessionStore) WriteCheckpoint(data StoreCheckpointData) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -459,8 +497,22 @@ func (s *SessionStore) WriteCheckpoint(data StoreCheckpointData) error {
 	if err != nil {
 		return err
 	}
+
+	// Tmp+rename — same atomic pattern as SaveChatTree — instead of a
+	// direct os.WriteFile (which truncates then writes in place). Without
+	// it, LoadCheckpoint — which reads by session id with no lock of its
+	// own, since a checkpoint can be loaded for any session, not just the
+	// current one — could observe a half-written file if it runs mid-write.
 	path := filepath.Join(s.dir, s.current.ID+".checkpoint.json")
-	return os.WriteFile(path, b, 0644)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0644); err != nil {
+		return fmt.Errorf("checkpoint: write tmp: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("checkpoint: rename: %w", err)
+	}
+	return nil
 }
 
 // HasCheckpoint returns true when a resumable checkpoint file exists for the session.

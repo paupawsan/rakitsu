@@ -189,6 +189,7 @@ type StructuredThought struct {
 
 // ToolCallSignature represents a planned tool call
 type ToolCallSignature struct {
+	ID        string                 `json:"id,omitempty"`
 	Name      string                 `json:"name"`
 	Arguments map[string]interface{} `json:"arguments"`
 	Reason    string                 `json:"reason,omitempty"`

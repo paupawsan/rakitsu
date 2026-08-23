@@ -261,12 +261,22 @@ func (dc *DebugController) Check(ctx context.Context, checkpoint string, agentNa
 	}
 }
 
-// Resume sends a resume action to unblock a paused agent.
+// Resume sends a resume action to unblock a paused agent. No-op unless the
+// controller is currently paused: resumeCh is a buffered channel (capacity
+// 1), so a stale, late, or duplicate Resume() call made while nothing is
+// paused would otherwise still succeed into that buffer — a buffered send
+// doesn't require a waiting receiver — and then get consumed as a spurious
+// pre-armed resume the NEXT time Check() actually pauses, skipping that
+// pause instead of waiting for a real decision. The old "select with
+// default" alone only caught the buffer-already-full case, not this one.
 func (dc *DebugController) Resume(action ResumeAction) {
+	if dc.GetState() != StatePaused {
+		return
+	}
 	select {
 	case dc.resumeCh <- action:
 	default:
-		// Not paused, discard
+		// Already has a pending resume signal buffered; discard.
 	}
 }
 
