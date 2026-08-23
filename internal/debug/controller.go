@@ -267,16 +267,40 @@ func (dc *DebugController) Check(ctx context.Context, checkpoint string, agentNa
 // paused would otherwise still succeed into that buffer — a buffered send
 // doesn't require a waiting receiver — and then get consumed as a spurious
 // pre-armed resume the NEXT time Check() actually pauses, skipping that
-// pause instead of waiting for a real decision. The old "select with
-// default" alone only caught the buffer-already-full case, not this one.
+// pause instead of waiting for a real decision.
+//
+// The state check and the claim on this pause must happen atomically under
+// dc.mu, not as two separate synchronized steps: checking GetState() and
+// then sending were previously independent operations, so two Resume()
+// calls arriving close together (a UI double-click, a client-side retry)
+// could both observe StatePaused before either one's send took effect —
+// the second would then buffer a spurious action that Check() reads on its
+// *next* pause, the same failure mode this function exists to prevent, just
+// reached via two near-simultaneous calls instead of one stale one. Setting
+// state away from StatePaused here, under the same lock as the check,
+// makes the first caller's claim exclusive: any Resume() racing in after it
+// sees a state that's already left StatePaused and returns without
+// sending. Check() still owns picking the exact next state (StateStepping
+// vs StateRunning, plus the step-into/step-out/run-until bookkeeping) once
+// it actually receives the action below — this only needs to be correct
+// enough to block a second claim, so StateRunning is a fine placeholder for
+// every action including ActionStep, overwritten within a lock-hold of
+// Check() consuming it.
 func (dc *DebugController) Resume(action ResumeAction) {
-	if dc.GetState() != StatePaused {
+	dc.mu.Lock()
+	if dc.state != StatePaused {
+		dc.mu.Unlock()
 		return
 	}
+	dc.state = StateRunning
+	dc.mu.Unlock()
+
 	select {
 	case dc.resumeCh <- action:
 	default:
-		// Already has a pending resume signal buffered; discard.
+		// Another send is already buffered — shouldn't happen under normal
+		// operation now that the claim above is exclusive per pause, but
+		// kept as a defensive fallback rather than blocking forever.
 	}
 }
 

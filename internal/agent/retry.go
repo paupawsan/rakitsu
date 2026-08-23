@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"math"
+	"net/http"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/paupawsan/rakitsu/internal/config"
+	"github.com/paupawsan/rakitsu/internal/llm"
 )
 
 // RetryConfig controls LLM call retry behaviour.
@@ -51,9 +53,24 @@ var (
 // isRateLimit returns true iff err is specifically a rate-limit signal
 // (HTTP 429 or an equivalent textual marker). Callers that need a longer
 // backoff curve for 429s key off this rather than the general isRetryable.
+//
+// If err (or something it wraps) reports its own HTTP status via
+// llm.StatusCoder — every built-in provider's Generate error does — that
+// status is authoritative and the text-matching fallback below is skipped
+// entirely: a status code is either 429 or it isn't, and a coincidental
+// "429"/"500"-looking number elsewhere in the message text (a token limit,
+// a duration, a quota count, ...) must not override what the provider
+// actually reported. The fallback only runs for errors with no known
+// status, e.g. a raw network error that never reached a provider response.
 func isRateLimit(err error) bool {
 	if err == nil {
 		return false
+	}
+	var sc llm.StatusCoder
+	if errors.As(err, &sc) {
+		if code := sc.StatusCode(); code > 0 {
+			return code == http.StatusTooManyRequests
+		}
 	}
 	msg := strings.ToLower(err.Error())
 	return http429Re.MatchString(msg) ||
@@ -62,6 +79,8 @@ func isRateLimit(err error) bool {
 }
 
 // isRetryable returns true for transient errors that are worth retrying.
+// See isRateLimit's comment — the same status-code-first, text-as-fallback
+// reasoning applies to the 5xx check below.
 func isRetryable(err error) bool {
 	if err == nil {
 		return false
@@ -72,6 +91,19 @@ func isRetryable(err error) bool {
 	}
 	if isRateLimit(err) {
 		return true
+	}
+	var sc llm.StatusCoder
+	if errors.As(err, &sc) {
+		if code := sc.StatusCode(); code > 0 {
+			switch code {
+			case http.StatusInternalServerError, http.StatusBadGateway,
+				http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+				return true
+			}
+			// A known, non-retryable status (400, 401, 404, ...) is
+			// authoritative — don't let the text fallback below second-guess it.
+			return false
+		}
 	}
 	msg := strings.ToLower(err.Error())
 	// Server errors

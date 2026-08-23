@@ -331,6 +331,7 @@ func (o *Orchestrator) runReAct(ctx context.Context, query string) (string, erro
 // call — a registry shared across concurrent Runs would let one Run's
 // registration overwrite another's tool object under the same name.
 func (o *Orchestrator) registerDelegationTools(registry *tools.ToolRegistry, state *orchestratorRunState) {
+	toolNames := o.resolvedToolNames()
 	for _, agentName := range o.agentNames {
 		agent, exists := o.agents[agentName]
 		if !exists {
@@ -345,6 +346,7 @@ func (o *Orchestrator) registerDelegationTools(registry *tools.ToolRegistry, sta
 			fromAgent:  o.name,
 			debugCtrl:  o.debugCtrl,
 			runState:   state,
+			toolName:   toolNames[agentName],
 		}
 
 		registry.RegisterTool(tool)
@@ -357,14 +359,52 @@ func (o *Orchestrator) registerDelegationTools(registry *tools.ToolRegistry, sta
 // name present in one but not the other would advertise a tool that was
 // never actually registered.
 func (o *Orchestrator) getDelegationToolNames() []string {
+	toolNames := o.resolvedToolNames()
 	names := make([]string, 0, len(o.agentNames))
 	for _, agentName := range o.agentNames {
 		if _, exists := o.agents[agentName]; !exists {
 			continue
 		}
-		names = append(names, "delegate_to_"+sanitizeToolName(agentName))
+		names = append(names, "delegate_to_"+toolNames[agentName])
 	}
 	return names
+}
+
+// resolvedToolNames returns each agent's sanitized, collision-free
+// delegation-tool-name suffix (without the "delegate_to_" prefix), keyed by
+// agent name. Computed fresh from o.agentNames on every call so
+// registerDelegationTools, getDelegationToolNames, and buildSystemPrompt —
+// which must all agree on the exact same name for a given agent — derive it
+// from one shared pass instead of each calling sanitizeToolName
+// independently and risking disagreement once a collision is disambiguated.
+//
+// sanitizeToolName alone isn't collision-free: distinct agent names like
+// "foo.bar", "foo_bar", "foo bar", and "Foo.Bar" all sanitize to the same
+// "foo_bar". Config validation only rejects exact-duplicate agent names, so
+// two such agents pass validation as distinct, then both register under the
+// same tool name — ToolRegistry.RegisterTool silently lets the second
+// overwrite the first (a log line, no error), leaving the first agent
+// permanently unreachable via delegation. A repeated sanitized name here
+// instead gets a numeric suffix (_2, _3, ...) so every agent keeps a
+// distinct, working tool name — and callers see the collision happen (it
+// shows up as an unexpected tool name in the system prompt), rather than an
+// agent silently vanishing with no error anywhere.
+func (o *Orchestrator) resolvedToolNames() map[string]string {
+	resolved := make(map[string]string, len(o.agentNames))
+	seen := make(map[string]int, len(o.agentNames))
+	for _, agentName := range o.agentNames {
+		if _, exists := o.agents[agentName]; !exists {
+			continue
+		}
+		base := sanitizeToolName(agentName)
+		seen[base]++
+		name := base
+		if n := seen[base]; n > 1 {
+			name = fmt.Sprintf("%s_%d", base, n)
+		}
+		resolved[agentName] = name
+	}
+	return resolved
 }
 
 // buildSystemPrompt builds the system prompt for the supervisor
@@ -387,11 +427,12 @@ func (o *Orchestrator) buildSystemPrompt() string {
 	sb.WriteString("\n## Delegation Tools\n\n")
 	sb.WriteString("You have access to delegation tools to assign tasks to worker agents:\n")
 
+	toolNames := o.resolvedToolNames()
 	for _, agentName := range o.agentNames {
 		if _, exists := o.agents[agentName]; !exists {
 			continue
 		}
-		toolName := "delegate_to_" + sanitizeToolName(agentName)
+		toolName := "delegate_to_" + toolNames[agentName]
 		sb.WriteString(fmt.Sprintf("- `%s`: Delegate a task to %s\n", toolName, agentName))
 	}
 
@@ -432,10 +473,20 @@ type DelegationTool struct {
 	fromAgent  string
 	debugCtrl  *debug.DebugController
 	runState   *orchestratorRunState // owning Run's fallback/salvage state; may be nil
+	// toolName is the pre-resolved, collision-free suffix (from
+	// Orchestrator.resolvedToolNames) to use after "delegate_to_". Left
+	// empty by call sites that build a DelegationTool directly rather than
+	// through registerDelegationTools (e.g. tests) — GetName falls back to
+	// sanitizing the agent's own name for those, same as before this field
+	// existed.
+	toolName string
 }
 
 // GetName returns the tool name
 func (t *DelegationTool) GetName() string {
+	if t.toolName != "" {
+		return "delegate_to_" + t.toolName
+	}
 	return "delegate_to_" + sanitizeToolName(t.agent.GetName())
 }
 
