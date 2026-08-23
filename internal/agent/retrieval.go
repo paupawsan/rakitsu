@@ -8,10 +8,19 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/paupawsan/rakitsu/internal/config"
 	"github.com/paupawsan/rakitsu/internal/llm"
 )
+
+// embeddingCallTimeout bounds a single Embed() call. ContextRetriever has no
+// ctx parameter (Index/Query are called deep inside the ReAct loop with no
+// caller cancellation threaded through), so without this a slow or hung
+// embedding provider blocks the calling goroutine indefinitely — this
+// caps the worst case instead of relying on caller cancellation that
+// structurally can't reach here today.
+const embeddingCallTimeout = 30 * time.Second
 
 // ContextRetriever indexes step content and retrieves relevant segments.
 type ContextRetriever interface {
@@ -101,11 +110,17 @@ func (r *BM25Retriever) Query(query string, topK int) []RetrievedSegment {
 		return nil
 	}
 
+	// Held for the whole scoring loop below, not just this snapshot: df is
+	// the same map object as r.df (maps are reference types), and Index
+	// mutates it under r.mu.Lock(). Releasing the lock here and reading
+	// df[term] later, after unlocking, would be an unsynchronized
+	// concurrent map read/write against a live Index() call — a runtime
+	// throw, not a recoverable panic.
 	r.mu.RLock()
+	defer r.mu.RUnlock()
 	docs := r.docs
 	df := r.df
 	n := len(docs)
-	r.mu.RUnlock()
 
 	if n == 0 {
 		return nil
@@ -195,8 +210,9 @@ type EmbeddingRetriever struct {
 	provider  llm.EmbeddingProvider
 	errorBias float64
 
-	mu   sync.RWMutex
-	docs []embeddedDoc
+	mu        sync.RWMutex
+	docs      []embeddedDoc
+	failedIDs map[string]struct{} // ids whose Embed() call failed; still in bm25, just not in docs
 }
 
 func (r *EmbeddingRetriever) Backend() string { return r.provider.GetName() }
@@ -205,18 +221,31 @@ func (r *EmbeddingRetriever) Index(id string, text string, meta SegmentMeta) {
 	// Always index in BM25 for fallback.
 	r.bm25.Index(id, text, meta)
 
-	emb, err := r.provider.Embed(context.Background(), text)
+	ctx, cancel := context.WithTimeout(context.Background(), embeddingCallTimeout)
+	defer cancel()
+	emb, err := r.provider.Embed(ctx, text)
 	if err != nil {
-		// Provider unreachable — BM25 fallback is already indexed.
+		// Provider unreachable — BM25 fallback is already indexed. Remember
+		// the id so Query can still surface it via BM25 even after other
+		// documents have embedded successfully (see failedIDs on the struct).
+		r.mu.Lock()
+		if r.failedIDs == nil {
+			r.failedIDs = make(map[string]struct{})
+		}
+		r.failedIDs[id] = struct{}{}
+		r.mu.Unlock()
 		return
 	}
 	r.mu.Lock()
 	r.docs = append(r.docs, embeddedDoc{id: id, text: text, meta: meta, embedding: emb})
+	delete(r.failedIDs, id)
 	r.mu.Unlock()
 }
 
 func (r *EmbeddingRetriever) Query(query string, topK int) []RetrievedSegment {
-	queryEmb, err := r.provider.Embed(context.Background(), query)
+	ctx, cancel := context.WithTimeout(context.Background(), embeddingCallTimeout)
+	defer cancel()
+	queryEmb, err := r.provider.Embed(ctx, query)
 	if err != nil {
 		// Provider unreachable — fall back to BM25.
 		return r.bm25.Query(query, topK)
@@ -224,6 +253,8 @@ func (r *EmbeddingRetriever) Query(query string, topK int) []RetrievedSegment {
 
 	r.mu.RLock()
 	docs := r.docs
+	hasFailed := len(r.failedIDs) > 0
+	failedIDs := r.failedIDs
 	r.mu.RUnlock()
 
 	if len(docs) == 0 {
@@ -254,6 +285,26 @@ func (r *EmbeddingRetriever) Query(query string, topK int) []RetrievedSegment {
 	for i, r := range results {
 		out[i] = r.seg
 	}
+
+	// Documents whose Embed() call failed never made it into docs above, so
+	// they're otherwise permanently invisible once at least one document has
+	// embedded successfully (the len(docs)==0 fallback above only fires on
+	// the very first query). Recover them via BM25 and append after the
+	// embedding-ranked results — the two scores aren't on comparable scales,
+	// so this is a supplementary tier, not a re-ranked merge.
+	if hasFailed && (topK <= 0 || len(out) < topK) {
+		bm25Results := r.bm25.Query(query, 0) // unbounded; filter below
+		for _, seg := range bm25Results {
+			if _, failed := failedIDs[seg.ID]; !failed {
+				continue
+			}
+			out = append(out, seg)
+			if topK > 0 && len(out) >= topK {
+				break
+			}
+		}
+	}
+
 	return out
 }
 
@@ -292,7 +343,7 @@ func FormatStepForIndex(step *Step) string {
 	for _, tr := range step.ToolResults {
 		out := tr.RawOutput
 		if len(out) > 500 {
-			out = out[:500] + "…"
+			out = truncateUTF8(out, 500) + "…"
 		}
 		if tr.Error != "" {
 			sb.WriteString(fmt.Sprintf("Error: %s\n", tr.Error))
@@ -328,7 +379,7 @@ func BuildRetrievalBlock(segments []RetrievedSegment) string {
 		sb.WriteString(": ")
 		text := seg.Text
 		if len(text) > 800 {
-			text = text[:800] + "…"
+			text = truncateUTF8(text, 800) + "…"
 		}
 		sb.WriteString(text)
 		sb.WriteString("\n")

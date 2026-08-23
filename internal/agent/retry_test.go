@@ -51,6 +51,56 @@ func TestIsRetryable_RateLimit(t *testing.T) {
 	}
 }
 
+// TestIsRetryable_DoesNotFalsePositiveOnEmbeddedDigits regression-guards
+// finding 27: isRetryable/isRateLimit used to match status codes with bare
+// strings.Contains, so a code's digits appearing as part of a larger
+// number or an alphanumeric token elsewhere in the message (not the actual
+// HTTP status) would wrongly classify a non-retryable error as transient —
+// retrying it 5 times with escalating backoff instead of failing fast.
+func TestIsRetryable_DoesNotFalsePositiveOnEmbeddedDigits(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+	}{
+		{"500 embedded in a duration", "finish_reason=length after 500ms"},
+		{"500 embedded in a larger number", "max_tokens must be between 1 and 4096, got 50000"},
+		{"500 embedded in a port number", "connect tcp 127.0.0.1:8500: no route to host"},
+		{"429 embedded in a duration", "429ms elapsed while waiting for stream"},
+		{"429 embedded in a larger number", "waited 14290 ms for the upstream"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := errors.New(tc.msg)
+			if isRetryable(err) {
+				t.Errorf("isRetryable(%q) = true, want false (status code digits are embedded in a larger token, not a real status code)", tc.msg)
+			}
+			if isRateLimit(err) {
+				t.Errorf("isRateLimit(%q) = true, want false (429 digits are embedded in a larger token, not a real 429)", tc.msg)
+			}
+		})
+	}
+}
+
+// TestIsRetryable_StillMatchesWordBoundedStatusCodes verifies the
+// word-boundary fix didn't regress the real, word-bounded status codes it's
+// meant to keep matching (a bare digit sequence flanked by non-word
+// characters — start/end of string, spaces, punctuation).
+func TestIsRetryable_StillMatchesWordBoundedStatusCodes(t *testing.T) {
+	cases := []string{
+		"429 Too Many Requests",
+		"HTTP/1.1 429",
+		"status: 500",
+		"error (502)",
+		"503.",
+		"504,",
+	}
+	for _, msg := range cases {
+		if !isRetryable(errors.New(msg)) {
+			t.Errorf("isRetryable(%q) = false, want true (word-bounded status code)", msg)
+		}
+	}
+}
+
 // --- retryDelay ---
 
 func TestRetryDelay_ExponentialBackoff(t *testing.T) {

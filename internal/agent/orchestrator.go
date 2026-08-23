@@ -4,6 +4,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -43,29 +44,6 @@ type Orchestrator struct {
 	rootGuard    *CompositeGuard // global CompositeGuard shared with all worker agents; nil = no enforcement
 	pricing      config.PricingConfig
 	pricingKnown bool
-
-	// Fallback state: capture the most recent successful worker result
-	// per Run so that if the synthetic supervisor returns empty (which
-	// happens because Hierarchical supervisors only have delegate_to_X
-	// tools and no respond_to_user path), the orchestrator returns the
-	// last worker output instead of "".
-	lastWorkerMu     sync.RWMutex
-	lastWorkerResult string
-
-	// Per-Run, per-worker unproductive-outcome tracker. When a worker
-	// returns unproductively (LastRunUnproductive()=true —
-	// salvaged_no_progress, max_iter+empty, or success+empty), the entry
-	// in unproductiveWorkers flips. Subsequent delegations to the same
-	// worker in this Run increment postUnproductiveRedelegations[w]; once
-	// that count reaches workerUnproductiveCap (default 1), the
-	// DelegationTool returns a [DELEGATION BLOCKED] message instead of
-	// calling the worker and emits WORKER_REDELEGATION_BLOCKED. Cleared at
-	// the top of each Run by clearLastWorkerResult(). Covers both the
-	// salvage-only subset and the broader max_iter+empty / success+empty
-	// supersets.
-	salvageMu                     sync.Mutex
-	unproductiveWorkers           map[string]bool
-	postUnproductiveRedelegations map[string]int
 }
 
 // workerUnproductiveCap is the maximum number of delegations to the same
@@ -92,35 +70,51 @@ type OutcomeReporter interface {
 	LastRunUnproductive() bool
 }
 
+// orchestratorRunState holds the fallback/salvage-tracking state scoped to a
+// single runReAct() invocation. This used to live directly on the long-lived
+// *Orchestrator (guarded by lastWorkerMu/salvageMu), which was only correct
+// for one Run at a time — the same *Orchestrator can be Run concurrently
+// (e.g. a nested orchestrator reachable through two independent delegation
+// paths). Two concurrent Runs sharing that state would corrupt each other:
+// one Run's start-of-turn reset could wipe another in-flight Run's worker
+// results and unproductive counts. Allocating a fresh orchestratorRunState
+// per runReAct() call and threading it through registerDelegationTools and
+// DelegationTool instead keeps each Run's bookkeeping isolated.
+type orchestratorRunState struct {
+	lastWorkerMu     sync.RWMutex
+	lastWorkerResult string
+
+	// Per-Run, per-worker unproductive-outcome tracker. When a worker
+	// returns unproductively (LastRunUnproductive()=true —
+	// salvaged_no_progress, max_iter+empty, or success+empty), the entry
+	// in unproductiveWorkers flips. Subsequent delegations to the same
+	// worker in this Run increment postUnproductiveRedelegations[w]; once
+	// that count reaches workerUnproductiveCap (default 1), the
+	// DelegationTool returns a [DELEGATION BLOCKED] message instead of
+	// calling the worker and emits WORKER_REDELEGATION_BLOCKED. Covers both
+	// the salvage-only subset and the broader max_iter+empty / success+empty
+	// supersets.
+	salvageMu                     sync.Mutex
+	unproductiveWorkers           map[string]bool
+	postUnproductiveRedelegations map[string]int
+}
+
 // recordWorkerResult is called by DelegationTool when a worker returns a
 // non-empty result. The most recent value is used as a fallback if the
 // supervisor's own final answer is empty.
-func (o *Orchestrator) recordWorkerResult(result string) {
+func (s *orchestratorRunState) recordWorkerResult(result string) {
 	if strings.TrimSpace(result) == "" {
 		return
 	}
-	o.lastWorkerMu.Lock()
-	o.lastWorkerResult = result
-	o.lastWorkerMu.Unlock()
+	s.lastWorkerMu.Lock()
+	s.lastWorkerResult = result
+	s.lastWorkerMu.Unlock()
 }
 
-func (o *Orchestrator) getLastWorkerResult() string {
-	o.lastWorkerMu.RLock()
-	defer o.lastWorkerMu.RUnlock()
-	return o.lastWorkerResult
-}
-
-func (o *Orchestrator) clearLastWorkerResult() {
-	o.lastWorkerMu.Lock()
-	o.lastWorkerResult = ""
-	o.lastWorkerMu.Unlock()
-
-	// Clear per-Run unproductive tracking so each new
-	// supervisor turn starts with a clean slate.
-	o.salvageMu.Lock()
-	o.unproductiveWorkers = nil
-	o.postUnproductiveRedelegations = nil
-	o.salvageMu.Unlock()
+func (s *orchestratorRunState) getLastWorkerResult() string {
+	s.lastWorkerMu.RLock()
+	defer s.lastWorkerMu.RUnlock()
+	return s.lastWorkerResult
 }
 
 // isRedelegationBlocked reports whether a further delegation to the named
@@ -128,23 +122,23 @@ func (o *Orchestrator) clearLastWorkerResult() {
 // has previously returned unproductively AND postUnproductiveRedelegations[w]
 // has reached workerUnproductiveCap. "Unproductive" covers the strict
 // superset of salvaged plus max_iter+empty and success+empty.
-func (o *Orchestrator) isRedelegationBlocked(worker string) bool {
-	o.salvageMu.Lock()
-	defer o.salvageMu.Unlock()
-	if !o.unproductiveWorkers[worker] {
+func (s *orchestratorRunState) isRedelegationBlocked(worker string) bool {
+	s.salvageMu.Lock()
+	defer s.salvageMu.Unlock()
+	if !s.unproductiveWorkers[worker] {
 		return false
 	}
-	return o.postUnproductiveRedelegations[worker] >= workerUnproductiveCap
+	return s.postUnproductiveRedelegations[worker] >= workerUnproductiveCap
 }
 
 // postUnproductiveCount returns how many post-unproductive delegations have
 // already happened to the named worker in this Run. Used for telemetry
 // payloads (the legacy JSON field `post_salvage_count` carries this value
 // since salvaged is the original / strict-subset shape).
-func (o *Orchestrator) postUnproductiveCount(worker string) int {
-	o.salvageMu.Lock()
-	defer o.salvageMu.Unlock()
-	return o.postUnproductiveRedelegations[worker]
+func (s *orchestratorRunState) postUnproductiveCount(worker string) int {
+	s.salvageMu.Lock()
+	defer s.salvageMu.Unlock()
+	return s.postUnproductiveRedelegations[worker]
 }
 
 // recordWorkerOutcome updates the per-worker unproductive-outcome tracker
@@ -157,18 +151,18 @@ func (o *Orchestrator) postUnproductiveCount(worker string) int {
 //
 // The order (read before, set after) ensures the FIRST unproductive return
 // from a worker doesn't count itself as a post-unproductive attempt.
-func (o *Orchestrator) recordWorkerOutcome(worker string, unproductive bool) {
-	o.salvageMu.Lock()
-	defer o.salvageMu.Unlock()
-	if o.unproductiveWorkers == nil {
-		o.unproductiveWorkers = make(map[string]bool)
-		o.postUnproductiveRedelegations = make(map[string]int)
+func (s *orchestratorRunState) recordWorkerOutcome(worker string, unproductive bool) {
+	s.salvageMu.Lock()
+	defer s.salvageMu.Unlock()
+	if s.unproductiveWorkers == nil {
+		s.unproductiveWorkers = make(map[string]bool)
+		s.postUnproductiveRedelegations = make(map[string]int)
 	}
-	if o.unproductiveWorkers[worker] {
-		o.postUnproductiveRedelegations[worker]++
+	if s.unproductiveWorkers[worker] {
+		s.postUnproductiveRedelegations[worker]++
 	}
 	if unproductive {
-		o.unproductiveWorkers[worker] = true
+		s.unproductiveWorkers[worker] = true
 	}
 }
 
@@ -271,12 +265,15 @@ func (o *Orchestrator) Run(ctx context.Context, query string) (string, error) {
 
 // runReAct executes the orchestrator using LLM-driven delegation via tool calls.
 func (o *Orchestrator) runReAct(ctx context.Context, query string) (string, error) {
-	// Register delegation tools for each worker agent
-	o.registerDelegationTools()
+	// Run-scoped fallback/salvage-tracking state, fresh per call so
+	// concurrent Runs of the same Orchestrator (e.g. a nested orchestrator
+	// reachable through two independent delegation paths) don't corrupt
+	// each other's worker-result fallback or unproductive-redelegation
+	// counts. See orchestratorRunState's doc comment.
+	state := &orchestratorRunState{}
 
-	// Clear any prior-Run worker result so this Run's fallback only
-	// considers workers invoked in this Run.
-	o.clearLastWorkerResult()
+	// Register delegation tools for each worker agent
+	o.registerDelegationTools(state)
 
 	// Create a supervisor agent that uses delegation tools
 	supervisor := &Agent{
@@ -316,15 +313,16 @@ func (o *Orchestrator) runReAct(ctx context.Context, query string) (string, erro
 	// worker output is strictly better than empty: the user gets the
 	// answer the worker produced, even if synthesis was missed.
 	if strings.TrimSpace(result) == "" {
-		if last := o.getLastWorkerResult(); last != "" {
+		if last := state.getLastWorkerResult(); last != "" {
 			return last, nil
 		}
 	}
 	return result, nil
 }
 
-// registerDelegationTools creates virtual tools for delegating to worker agents
-func (o *Orchestrator) registerDelegationTools() {
+// registerDelegationTools creates virtual tools for delegating to worker
+// agents, wiring each one to the given run-scoped state.
+func (o *Orchestrator) registerDelegationTools(state *orchestratorRunState) {
 	for _, agentName := range o.agentNames {
 		agent, exists := o.agents[agentName]
 		if !exists {
@@ -338,18 +336,25 @@ func (o *Orchestrator) registerDelegationTools() {
 			handoffCfg: o.handoffConfig,
 			fromAgent:  o.name,
 			debugCtrl:  o.debugCtrl,
-			parent:     o,
+			runState:   state,
 		}
 
 		o.toolRegistry.RegisterTool(tool)
 	}
 }
 
-// getDelegationToolNames returns the names of all delegation tools
+// getDelegationToolNames returns the names of all delegation tools. Skips
+// any agentNames entry missing from o.agents, matching the existence check
+// registerDelegationTools and buildSystemPrompt already apply — otherwise a
+// name present in one but not the other would advertise a tool that was
+// never actually registered.
 func (o *Orchestrator) getDelegationToolNames() []string {
-	names := make([]string, len(o.agentNames))
-	for i, agentName := range o.agentNames {
-		names[i] = "delegate_to_" + sanitizeToolName(agentName)
+	names := make([]string, 0, len(o.agentNames))
+	for _, agentName := range o.agentNames {
+		if _, exists := o.agents[agentName]; !exists {
+			continue
+		}
+		names = append(names, "delegate_to_"+sanitizeToolName(agentName))
 	}
 	return names
 }
@@ -375,6 +380,9 @@ func (o *Orchestrator) buildSystemPrompt() string {
 	sb.WriteString("You have access to delegation tools to assign tasks to worker agents:\n")
 
 	for _, agentName := range o.agentNames {
+		if _, exists := o.agents[agentName]; !exists {
+			continue
+		}
 		toolName := "delegate_to_" + sanitizeToolName(agentName)
 		sb.WriteString(fmt.Sprintf("- `%s`: Delegate a task to %s\n", toolName, agentName))
 	}
@@ -389,9 +397,19 @@ func (o *Orchestrator) buildSystemPrompt() string {
 	return sb.String()
 }
 
-// sanitizeToolName converts an agent name to a valid tool name
+// toolNameInvalidChars matches anything outside the character set most LLM
+// function-calling APIs (OpenAI, Anthropic, Gemini) allow in a tool name.
+var toolNameInvalidChars = regexp.MustCompile(`[^a-z0-9_-]+`)
+
+// sanitizeToolName converts an agent name to a valid tool name. Agent names
+// come directly from user-authored YAML with no character-set restriction,
+// so beyond lowercasing and swapping spaces for underscores this also
+// strips anything else a provider is likely to reject outright (parens,
+// dots, unicode, ...), which would otherwise break tool-calling for the
+// whole orchestrator turn.
 func sanitizeToolName(name string) string {
-	return strings.ToLower(strings.ReplaceAll(name, " ", "_"))
+	lowered := strings.ToLower(strings.ReplaceAll(name, " ", "_"))
+	return toolNameInvalidChars.ReplaceAllString(lowered, "_")
 }
 
 // ============================================================
@@ -405,7 +423,7 @@ type DelegationTool struct {
 	handoffCfg *config.HandoffConfig
 	fromAgent  string
 	debugCtrl  *debug.DebugController
-	parent     *Orchestrator // back-pointer for worker-result capture; may be nil
+	runState   *orchestratorRunState // owning Run's fallback/salvage state; may be nil
 }
 
 // GetName returns the tool name
@@ -465,8 +483,8 @@ func (t *DelegationTool) Execute(ctx context.Context, args map[string]interface{
 	// so the supervisor's ReAct loop continues normally and the LLM is
 	// informed about why this delegation didn't happen — letting it
 	// choose a different worker or commit a final answer instead.
-	if t.parent != nil && t.parent.isRedelegationBlocked(workerName) {
-		count := t.parent.postUnproductiveCount(workerName)
+	if t.runState != nil && t.runState.isRedelegationBlocked(workerName) {
+		count := t.runState.postUnproductiveCount(workerName)
 		t.eventBus.Emit(t.fromAgent, telemetry.EventWorkerRedelegationBlocked, telemetry.WorkerRedelegationBlockedPayload{
 			FromAgent:        t.fromAgent,
 			BlockedWorker:    workerName,
@@ -500,11 +518,11 @@ func (t *DelegationTool) Execute(ctx context.Context, args map[string]interface{
 		return "", fmt.Errorf("agent %s failed: %w", workerName, err)
 	}
 
-	// Capture this worker's result on the parent orchestrator so it
-	// can fall back to the latest worker output if the supervisor's own
-	// final answer is empty.
-	if t.parent != nil {
-		t.parent.recordWorkerResult(result)
+	// Capture this worker's result on the owning Run's state so it can
+	// fall back to the latest worker output if the supervisor's own final
+	// answer is empty.
+	if t.runState != nil {
+		t.runState.recordWorkerResult(result)
 
 		// Read the worker's outcome (via OutcomeReporter,
 		// the broader signal — falling back to SalvageReporter for the
@@ -518,7 +536,7 @@ func (t *DelegationTool) Execute(ctx context.Context, args map[string]interface{
 		} else if r, ok := t.agent.(SalvageReporter); ok {
 			unproductive = r.LastRunSalvaged()
 		}
-		t.parent.recordWorkerOutcome(workerName, unproductive)
+		t.runState.recordWorkerOutcome(workerName, unproductive)
 	}
 
 	// Emit message event with the result

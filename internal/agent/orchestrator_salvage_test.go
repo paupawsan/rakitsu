@@ -10,6 +10,7 @@ import (
 
 	"github.com/paupawsan/rakitsu/internal/debug"
 	"github.com/paupawsan/rakitsu/internal/telemetry"
+	"github.com/paupawsan/rakitsu/internal/tools"
 )
 
 // salvageFakeAgent is a Runner+SalvageReporter+OutcomeReporter test double.
@@ -110,7 +111,7 @@ func TestOrchestrator_FirstSalvageAllowsOneRetry(t *testing.T) {
 
 	worker := &salvageFakeAgent{name: "W", answer: "result", salvagedSchedule: []bool{true, false}}
 	orch := makeSalvageOrchestrator(map[string]Runner{"W": worker}, bus)
-	dt := &DelegationTool{agent: worker, eventBus: bus, fromAgent: orch.name, parent: orch}
+	dt := &DelegationTool{agent: worker, eventBus: bus, fromAgent: orch.name, runState: &orchestratorRunState{}}
 
 	events := collectEvents(bus, func() {
 		for i := 0; i < 2; i++ {
@@ -144,7 +145,7 @@ func TestOrchestrator_TwoSalvagesBlocksThird(t *testing.T) {
 
 	worker := &salvageFakeAgent{name: "W", answer: "result", salvagedSchedule: []bool{true, true, false}}
 	orch := makeSalvageOrchestrator(map[string]Runner{"W": worker}, bus)
-	dt := &DelegationTool{agent: worker, eventBus: bus, fromAgent: orch.name, parent: orch}
+	dt := &DelegationTool{agent: worker, eventBus: bus, fromAgent: orch.name, runState: &orchestratorRunState{}}
 
 	events := collectEvents(bus, func() {
 		// Call 1: salvaged. Allowed.
@@ -193,7 +194,7 @@ func TestOrchestrator_BlockedReturnsToolOutputNotError(t *testing.T) {
 
 	worker := &salvageFakeAgent{name: "W", answer: "r", salvagedSchedule: []bool{true, true}}
 	orch := makeSalvageOrchestrator(map[string]Runner{"W": worker}, bus)
-	dt := &DelegationTool{agent: worker, eventBus: bus, fromAgent: orch.name, parent: orch}
+	dt := &DelegationTool{agent: worker, eventBus: bus, fromAgent: orch.name, runState: &orchestratorRunState{}}
 
 	_, _ = dt.Execute(context.Background(), map[string]interface{}{"task": "go"})
 	_, _ = dt.Execute(context.Background(), map[string]interface{}{"task": "go"})
@@ -225,8 +226,13 @@ func TestOrchestrator_DifferentWorkerStillAllowedAfterBlock(t *testing.T) {
 	workerY := &salvageFakeAgent{name: "Y", answer: "ry", salvagedSchedule: []bool{false}}
 	orch := makeSalvageOrchestrator(map[string]Runner{"X": workerX, "Y": workerY}, bus)
 
-	dtX := &DelegationTool{agent: workerX, eventBus: bus, fromAgent: orch.name, parent: orch}
-	dtY := &DelegationTool{agent: workerY, eventBus: bus, fromAgent: orch.name, parent: orch}
+	// Both delegation tools share one run-scoped state, same as
+	// registerDelegationTools() wires them within a single runReAct() call —
+	// the per-worker scope comes from the map key, not a separate state
+	// object per worker.
+	state := &orchestratorRunState{}
+	dtX := &DelegationTool{agent: workerX, eventBus: bus, fromAgent: orch.name, runState: state}
+	dtY := &DelegationTool{agent: workerY, eventBus: bus, fromAgent: orch.name, runState: state}
 
 	// Burn X's salvage budget.
 	_, _ = dtX.Execute(context.Background(), map[string]interface{}{"task": "x1"})
@@ -245,15 +251,16 @@ func TestOrchestrator_DifferentWorkerStillAllowedAfterBlock(t *testing.T) {
 	}
 }
 
-// TestOrchestrator_NewRunResetsSalvageState: block worker X in turn 1; call
-// clearLastWorkerResult (which fires at the top of each Run); first
-// delegation to X in turn 2 goes through unblocked.
+// TestOrchestrator_NewRunResetsSalvageState: block worker X in turn 1; a
+// fresh orchestratorRunState (what runReAct allocates at the start of every
+// Run) backs turn 2's delegation tool; first delegation to X in turn 2 goes
+// through unblocked.
 func TestOrchestrator_NewRunResetsSalvageState(t *testing.T) {
 	bus := telemetry.NewEventBus(64)
 
 	worker := &salvageFakeAgent{name: "W", answer: "r", salvagedSchedule: []bool{true, true, false, false}}
 	orch := makeSalvageOrchestrator(map[string]Runner{"W": worker}, bus)
-	dt := &DelegationTool{agent: worker, eventBus: bus, fromAgent: orch.name, parent: orch}
+	dt := &DelegationTool{agent: worker, eventBus: bus, fromAgent: orch.name, runState: &orchestratorRunState{}}
 
 	// Turn 1: salvage twice, then block.
 	_, _ = dt.Execute(context.Background(), map[string]interface{}{"task": "t1a"})
@@ -263,12 +270,13 @@ func TestOrchestrator_NewRunResetsSalvageState(t *testing.T) {
 		t.Fatalf("turn 1 third call should be blocked, got %q", out)
 	}
 
-	// Simulate a new Run: clearLastWorkerResult is what runReAct calls at
-	// the start of each supervisor turn.
-	orch.clearLastWorkerResult()
+	// Simulate a new Run: runReAct allocates a brand-new orchestratorRunState
+	// (and therefore a brand-new DelegationTool) at the top of every call —
+	// nothing carries over from turn 1's state.
+	dt2 := &DelegationTool{agent: worker, eventBus: bus, fromAgent: orch.name, runState: &orchestratorRunState{}}
 
 	// Turn 2: delegation should now go through.
-	out2, err := dt.Execute(context.Background(), map[string]interface{}{"task": "t2"})
+	out2, err := dt2.Execute(context.Background(), map[string]interface{}{"task": "t2"})
 	if err != nil {
 		t.Fatalf("turn 2 call: %v", err)
 	}
@@ -304,7 +312,7 @@ func TestOrchestrator_TwoMaxIterEmptyBlocksThird(t *testing.T) {
 		unproductiveSchedule: []bool{true, true, false},
 	}
 	orch := makeSalvageOrchestrator(map[string]Runner{"BackendAuditor": worker}, bus)
-	dt := &DelegationTool{agent: worker, eventBus: bus, fromAgent: orch.name, parent: orch}
+	dt := &DelegationTool{agent: worker, eventBus: bus, fromAgent: orch.name, runState: &orchestratorRunState{}}
 
 	events := collectEvents(bus, func() {
 		// Call 1: unproductive. Allowed.
@@ -361,7 +369,7 @@ func TestOrchestrator_SuccessEmptyTreatedAsUnproductive(t *testing.T) {
 		unproductiveSchedule: []bool{true, true, false},
 	}
 	orch := makeSalvageOrchestrator(map[string]Runner{"W": worker}, bus)
-	dt := &DelegationTool{agent: worker, eventBus: bus, fromAgent: orch.name, parent: orch}
+	dt := &DelegationTool{agent: worker, eventBus: bus, fromAgent: orch.name, runState: &orchestratorRunState{}}
 
 	events := collectEvents(bus, func() {
 		_, _ = dt.Execute(context.Background(), map[string]interface{}{"task": "q1"})
@@ -396,7 +404,7 @@ func TestOrchestrator_MixedSalvageAndMaxIterCounted(t *testing.T) {
 		unproductiveSchedule: []bool{true, true, false},
 	}
 	orch := makeSalvageOrchestrator(map[string]Runner{"W": worker}, bus)
-	dt := &DelegationTool{agent: worker, eventBus: bus, fromAgent: orch.name, parent: orch}
+	dt := &DelegationTool{agent: worker, eventBus: bus, fromAgent: orch.name, runState: &orchestratorRunState{}}
 
 	_, _ = dt.Execute(context.Background(), map[string]interface{}{"task": "a"})
 	_, _ = dt.Execute(context.Background(), map[string]interface{}{"task": "b"})
@@ -429,7 +437,7 @@ func TestOrchestrator_LastRunUnproductivePreferredOverSalvaged(t *testing.T) {
 		unproductiveSchedule: []bool{true, true, false},
 	}
 	orch := makeSalvageOrchestrator(map[string]Runner{"W": worker}, bus)
-	dt := &DelegationTool{agent: worker, eventBus: bus, fromAgent: orch.name, parent: orch}
+	dt := &DelegationTool{agent: worker, eventBus: bus, fromAgent: orch.name, runState: &orchestratorRunState{}}
 
 	_, _ = dt.Execute(context.Background(), map[string]interface{}{"task": "a"})
 	_, _ = dt.Execute(context.Background(), map[string]interface{}{"task": "b"})
@@ -440,5 +448,79 @@ func TestOrchestrator_LastRunUnproductivePreferredOverSalvaged(t *testing.T) {
 	}
 	if !strings.HasPrefix(out, "[DELEGATION BLOCKED]") {
 		t.Errorf("OutcomeReporter signal not preferred — cap didn't arm; got %q", out)
+	}
+}
+
+// TestOrchestrator_RegisterDelegationTools_IsolatesConcurrentRunState
+// regression-guards finding 18: per-Run worker-result/unproductive tracking
+// used to live directly on the shared *Orchestrator, guarded by mutexes —
+// correct for one Run at a time, but the same *Orchestrator can be Run
+// concurrently (e.g. a nested orchestrator reachable through two independent
+// delegation paths). Two concurrent runReAct() calls sharing that state
+// would corrupt each other: one Run's unproductive-worker tracking would
+// silently arm the block gate for the other Run, and vice versa.
+// registerDelegationTools() now takes the calling Run's orchestratorRunState
+// explicitly, so this wires two different states against the same
+// Orchestrator, drives both concurrently, and asserts neither run's
+// tracking leaks into the other's.
+func TestOrchestrator_RegisterDelegationTools_IsolatesConcurrentRunState(t *testing.T) {
+	bus := telemetry.NewEventBus(64)
+	worker := &salvageFakeAgent{
+		name:   "W",
+		answer: "r",
+		// Every call reports unproductive, regardless of which goroutine's
+		// call lands on which schedule index — keeps the assertions below
+		// deterministic under concurrent interleaving.
+		salvagedSchedule:     []bool{true, true, true, true, true, true},
+		unproductiveSchedule: []bool{true, true, true, true, true, true},
+	}
+	orch := &Orchestrator{
+		name:         "Sup",
+		agentNames:   []string{"W"},
+		agents:       map[string]Runner{"W": worker},
+		eventBus:     bus,
+		toolRegistry: tools.NewToolRegistry(),
+	}
+
+	// Two independent run-scoped states, as runReAct() would allocate fresh
+	// for two concurrent Run() calls.
+	stateA := &orchestratorRunState{}
+	stateB := &orchestratorRunState{}
+
+	orch.registerDelegationTools(stateA)
+	toolAIface := orch.toolRegistry.GetTool("delegate_to_w")
+	toolA, ok := toolAIface.(*DelegationTool)
+	if !ok {
+		t.Fatalf("GetTool returned %T, want *DelegationTool", toolAIface)
+	}
+	if toolA.runState != stateA {
+		t.Fatalf("tool registered via registerDelegationTools(stateA) has a different runState — not wired to the state passed in")
+	}
+
+	// dtB is built directly with stateB rather than a second
+	// registerDelegationTools() call, since the shared toolRegistry would
+	// otherwise just overwrite toolA's entry under the same tool name — the
+	// isolation property under test is orchestratorRunState's, not the
+	// (separately shared, by design) toolRegistry's.
+	dtB := &DelegationTool{agent: worker, eventBus: bus, fromAgent: orch.name, runState: stateB}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, _ = toolA.Execute(context.Background(), map[string]interface{}{"task": "a1"})
+		_, _ = toolA.Execute(context.Background(), map[string]interface{}{"task": "a2"})
+	}()
+	go func() {
+		defer wg.Done()
+		_, _ = dtB.Execute(context.Background(), map[string]interface{}{"task": "b1"})
+	}()
+	wg.Wait()
+
+	if !stateA.isRedelegationBlocked("W") {
+		t.Error("Run A: worker W should be blocked after two unproductive delegations under state A")
+	}
+	if stateB.isRedelegationBlocked("W") {
+		t.Error("Run B: made only one delegation under state B and must not be blocked — a leak from Run A's tracking would fail this")
 	}
 }

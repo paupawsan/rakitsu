@@ -160,6 +160,50 @@ func TestResume_AfterResumeDoesNotPauseWithoutBreakpoint(t *testing.T) {
 	}
 }
 
+// TestResume_IgnoredWhenNotPaused regression-guards finding 23: Resume()
+// used to rely solely on "select with default" against resumeCh (buffered,
+// capacity 1) to detect "not paused". A buffered send succeeds even with no
+// waiting receiver, so a stale/late Resume() call issued while the
+// controller was StateRunning would silently land in the buffer instead of
+// being discarded — then get consumed as a spurious pre-armed resume the
+// NEXT time Check() actually paused, skipping that pause instead of
+// blocking for a real decision.
+func TestResume_IgnoredWhenNotPaused(t *testing.T) {
+	bus := telemetry.NewEventBus(8)
+	dc := NewDebugController(bus)
+	dc.SetBreakpoint(BreakpointKey{EventType: "pre_agent", AgentName: "Worker"})
+
+	// Fire a Resume() while nothing is paused — must be discarded, not
+	// buffered into resumeCh.
+	dc.Resume(ActionResume)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		dc.Check(ctx, "pre_agent", "Worker", 0, nil)
+		close(done)
+	}()
+
+	// The stray Resume() above must NOT have pre-armed the pause: Check
+	// should still be blocked waiting for a real decision.
+	select {
+	case <-done:
+		t.Fatal("Check returned immediately — a stale Resume() call before the pause was incorrectly consumed by it")
+	case <-time.After(150 * time.Millisecond):
+		// Good — still paused.
+	}
+
+	// A genuine Resume() issued now must still unblock it.
+	dc.Resume(ActionResume)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Check never unblocked after a real Resume() call")
+	}
+}
+
 func TestWildcardBreakpoint_MatchesAll(t *testing.T) {
 	bus := telemetry.NewEventBus(8)
 	dc := NewDebugController(bus)
