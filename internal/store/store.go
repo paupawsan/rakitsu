@@ -198,19 +198,22 @@ func (s *SessionStore) CurrentSessionID() string {
 
 // ListSessions returns all sessions, newest first.
 func (s *SessionStore) ListSessions() ([]SessionMeta, error) {
-	sessions, err := s.readIndex()
-	if err != nil {
-		return nil, err
-	}
-
-	// Mark orphaned "running" sessions as stale (not the current active session)
+	// readIndex is held under s.mu for its whole call, not just the
+	// s.current.ID read afterward — StartSession/EndSession/DeleteSession
+	// all write sessions.json under this same lock, and an unlocked read
+	// landing mid-write could otherwise observe a truncated file.
 	s.mu.Lock()
+	sessions, err := s.readIndex()
 	currentID := ""
 	if s.current != nil {
 		currentID = s.current.ID
 	}
 	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
 
+	// Mark orphaned "running" sessions as stale (not the current active session)
 	for i := range sessions {
 		if sessions[i].Status == SessionRunning && sessions[i].ID != currentID {
 			sessions[i].Status = SessionStale
@@ -230,17 +233,17 @@ func (s *SessionStore) ListSessions() ([]SessionMeta, error) {
 // current active one) reports as stale here too, instead of GetSession and
 // ListSessions disagreeing about the same session's status.
 func (s *SessionStore) GetSession(id string) (*SessionMeta, error) {
-	sessions, err := s.readIndex()
-	if err != nil {
-		return nil, err
-	}
-
+	// Same locked-readIndex reasoning as ListSessions above.
 	s.mu.Lock()
+	sessions, err := s.readIndex()
 	currentID := ""
 	if s.current != nil {
 		currentID = s.current.ID
 	}
 	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
 
 	for i := range sessions {
 		if sessions[i].ID == id {
@@ -317,7 +320,20 @@ func (s *SessionStore) writeIndex(sessions []SessionMeta) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.indexPath(), data, 0644)
+	// tmp+rename, same as WriteCheckpoint below — a plain os.WriteFile
+	// truncates the file before writing the new content, so a reader
+	// landing mid-write (even one holding s.mu, briefly, between the
+	// truncate and the write completing) could observe a corrupt file.
+	path := s.indexPath()
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return fmt.Errorf("write index: write tmp: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("write index: rename: %w", err)
+	}
+	return nil
 }
 
 func (s *SessionStore) appendToIndex(meta SessionMeta) error {
