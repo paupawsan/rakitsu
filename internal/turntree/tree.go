@@ -74,6 +74,7 @@ var (
 	ErrUnknownNode   = errors.New("turntree: unknown node")
 	ErrUnknownParent = errors.New("turntree: unknown parent")
 	ErrSiblingCount  = errors.New("turntree: no sibling to switch to")
+	ErrCycle         = errors.New("turntree: cycle detected in parent chain")
 )
 
 // New returns an empty Tree.
@@ -154,12 +155,22 @@ func (t *Tree[E]) SwitchToSibling(targetID string, dir int) (string, error) {
 // SetActivePath walks from leafTurnID up to its root, setting ActiveChild
 // at each parent so leafTurnID sits on the active path. Used by the Tree
 // Viewer's "Make active" affordance.
+//
+// Guards against a cycle in the parent chain (corrupt data — e.g. a hand-
+// edited or partially-migrated persisted tree) the same way ActivePath
+// does: without it, a cycle would walk cur = parent forever instead of
+// terminating at a root.
 func (t *Tree[E]) SetActivePath(leafTurnID string) error {
 	cur, ok := t.Nodes[leafTurnID]
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrUnknownNode, leafTurnID)
 	}
+	seen := make(map[string]struct{})
 	for cur != nil {
+		if _, dup := seen[cur.ID]; dup {
+			return fmt.Errorf("%w: %s", ErrCycle, cur.ID)
+		}
+		seen[cur.ID] = struct{}{}
 		t.ActiveChild[cur.ParentID] = cur.ID
 		if cur.ParentID == "" {
 			break

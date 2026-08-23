@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"math"
+	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/paupawsan/rakitsu/internal/config"
+	"github.com/paupawsan/rakitsu/internal/llm"
 )
 
 // RetryConfig controls LLM call retry behaviour.
@@ -34,20 +37,50 @@ var defaultRetryConfig = RetryConfig{
 // seconds like network blips.
 const rateLimitBaseDelay = 10 * time.Second
 
+// http429Re and http5xxRe match a bare, word-bounded HTTP status code in a
+// lowercased error message. Word-bounded so a status code's digits don't
+// false-positive when they're actually part of a larger number or an
+// alphanumeric token elsewhere in the message — a plain
+// strings.Contains(msg, "500") also matches "500ms", "port 8500", or
+// "5003", wrongly classifying a non-retryable error (e.g. a 400 complaining
+// that max_tokens must be <= 500) as a transient server error worth
+// retrying 5 times with escalating backoff instead of failing fast.
+var (
+	http429Re = regexp.MustCompile(`\b429\b`)
+	http5xxRe = regexp.MustCompile(`\b(500|502|503|504)\b`)
+)
+
 // isRateLimit returns true iff err is specifically a rate-limit signal
 // (HTTP 429 or an equivalent textual marker). Callers that need a longer
 // backoff curve for 429s key off this rather than the general isRetryable.
+//
+// If err (or something it wraps) reports its own HTTP status via
+// llm.StatusCoder — every built-in provider's Generate error does — that
+// status is authoritative and the text-matching fallback below is skipped
+// entirely: a status code is either 429 or it isn't, and a coincidental
+// "429"/"500"-looking number elsewhere in the message text (a token limit,
+// a duration, a quota count, ...) must not override what the provider
+// actually reported. The fallback only runs for errors with no known
+// status, e.g. a raw network error that never reached a provider response.
 func isRateLimit(err error) bool {
 	if err == nil {
 		return false
 	}
+	var sc llm.StatusCoder
+	if errors.As(err, &sc) {
+		if code := sc.StatusCode(); code > 0 {
+			return code == http.StatusTooManyRequests
+		}
+	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "429") ||
+	return http429Re.MatchString(msg) ||
 		strings.Contains(msg, "rate limit") ||
 		strings.Contains(msg, "too many requests")
 }
 
 // isRetryable returns true for transient errors that are worth retrying.
+// See isRateLimit's comment — the same status-code-first, text-as-fallback
+// reasoning applies to the 5xx check below.
 func isRetryable(err error) bool {
 	if err == nil {
 		return false
@@ -59,10 +92,22 @@ func isRetryable(err error) bool {
 	if isRateLimit(err) {
 		return true
 	}
+	var sc llm.StatusCoder
+	if errors.As(err, &sc) {
+		if code := sc.StatusCode(); code > 0 {
+			switch code {
+			case http.StatusInternalServerError, http.StatusBadGateway,
+				http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+				return true
+			}
+			// A known, non-retryable status (400, 401, 404, ...) is
+			// authoritative — don't let the text fallback below second-guess it.
+			return false
+		}
+	}
 	msg := strings.ToLower(err.Error())
 	// Server errors
-	if strings.Contains(msg, "500") || strings.Contains(msg, "502") ||
-		strings.Contains(msg, "503") || strings.Contains(msg, "504") {
+	if http5xxRe.MatchString(msg) {
 		return true
 	}
 	// Network / timeout

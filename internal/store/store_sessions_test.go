@@ -54,6 +54,63 @@ func TestListSessions_Empty(t *testing.T) {
 	}
 }
 
+// TestGetSession_ReclassifiesOrphanedRunningAsStale regression-guards
+// against GetSession and ListSessions disagreeing about the same session's
+// status: ListSessions already reclassifies an orphaned "running" session
+// (any ID other than the current active one — e.g. left behind by a crashed
+// process) as "stale" before returning it, but GetSession skipped that same
+// logic and returned the raw indexed status forever.
+func TestGetSession_ReclassifiesOrphanedRunningAsStale(t *testing.T) {
+	s := newTestStore(t)
+
+	// Simulate a crashed run: StartSession without a matching EndSession
+	// leaves the index entry at Status=running, and s.current pointing at
+	// it. A fresh store instance loaded later (the real-world crash-recovery
+	// path) has s.current == nil, so this session is "orphaned running" as
+	// far as any store instance reading the index is concerned.
+	if err := s.StartSession(SessionMeta{Name: "crashed", Query: "q"}); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	id := s.CurrentSessionID()
+
+	// Reload against the same directory with no in-memory current session,
+	// as rakitsu would after a restart.
+	reloaded := &SessionStore{dir: s.dir}
+
+	got, err := reloaded.GetSession(id)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if got.Status != SessionStale {
+		t.Errorf("GetSession Status = %q, want %q (orphaned running session)", got.Status, SessionStale)
+	}
+
+	// ListSessions must agree.
+	list, err := reloaded.ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(list) != 1 || list[0].Status != SessionStale {
+		t.Errorf("ListSessions = %+v, want single entry with Status=%q", list, SessionStale)
+	}
+}
+
+// TestGetSession_CurrentSessionStaysRunning verifies the reclassification
+// doesn't misfire on the store's own active session — only sessions OTHER
+// than s.current are stale candidates.
+func TestGetSession_CurrentSessionStaysRunning(t *testing.T) {
+	s := newTestStore(t)
+	id := startTestSession(t, s)
+
+	got, err := s.GetSession(id)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if got.Status != SessionRunning {
+		t.Errorf("GetSession Status = %q, want %q (still the active session)", got.Status, SessionRunning)
+	}
+}
+
 func TestListSessions_OrderedNewestFirst(t *testing.T) {
 	s := newTestStore(t)
 

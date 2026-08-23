@@ -194,6 +194,28 @@ func TestSetActivePathThroughMultipleBranches(t *testing.T) {
 	}
 }
 
+// TestSetActivePathDetectsCycle regression-guards finding 25: SetActivePath
+// walked cur = t.Nodes[cur.ParentID] with no cycle guard, unlike
+// ActivePath's existing `seen` map — corrupt data with a cycle in the
+// parent chain (e.g. a hand-edited or partially-migrated persisted tree)
+// would hang forever instead of returning an error.
+func TestSetActivePathDetectsCycle(t *testing.T) {
+	tr := New[fakeEntry]()
+	_, _ = tr.AppendTurn("a", "a", "")
+	_, _ = tr.AppendTurn("b", "b", "a")
+	// AppendTurn/AddSibling can't produce a cycle on their own — hand-corrupt
+	// the parent chain into a -> b -> a to simulate corrupt persisted data.
+	tr.Nodes["a"].ParentID = "b"
+
+	err := tr.SetActivePath("b")
+	if err == nil {
+		t.Fatal("expected an error for a cyclic parent chain, got nil")
+	}
+	if !errors.Is(err, ErrCycle) {
+		t.Errorf("error = %v, want wrapping ErrCycle", err)
+	}
+}
+
 func TestSiblingIndex(t *testing.T) {
 	tr := New[fakeEntry]()
 	_, _ = tr.AppendTurn("t1", "a", "")

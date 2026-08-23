@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // ============================================================
@@ -43,6 +44,16 @@ func TestThinkingPlaceholder_ExactBoundary(t *testing.T) {
 	// Exactly at limit — no ellipsis
 	if strings.HasSuffix(got, "...]") {
 		t.Errorf("should not have ellipsis at exact boundary: %q", got)
+	}
+}
+
+// TestThinkingPlaceholder_TruncatesOnRuneBoundary regression-guards against
+// byte-offset truncation splitting a multi-byte UTF-8 character mid-codepoint.
+func TestThinkingPlaceholder_TruncatesOnRuneBoundary(t *testing.T) {
+	content := strings.Repeat("思", thinkingPlaceholderMax) // 3 bytes/rune; well over the byte cap
+	got := ThinkingPlaceholder(0, content)
+	if !utf8.ValidString(got) {
+		t.Errorf("ThinkingPlaceholder produced invalid UTF-8: %q", got)
 	}
 }
 
@@ -86,6 +97,30 @@ func TestThinkingStore_SanitizesFileName(t *testing.T) {
 	expected := filepath.Join(tmp, "my_agent_name-0.md")
 	if _, err := os.Stat(expected); err != nil {
 		t.Errorf("expected sanitized file %s to exist: %v", expected, err)
+	}
+}
+
+// TestNewThinkingStore_SanitizesSessionID regression-guards against
+// NewThinkingStore using a raw, unsanitized sessionID as a path component —
+// inconsistent with Save's sanitizeFileName treatment of agentName.
+func TestNewThinkingStore_SanitizesSessionID(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	store := NewThinkingStore("weird:session/id")
+	if store == nil {
+		t.Fatal("NewThinkingStore returned nil")
+	}
+	if strings.ContainsAny(store.dir, ":/\\") && !strings.HasPrefix(store.dir, tmp) {
+		t.Errorf("store.dir = %q still contains unsanitized separators from sessionID", store.dir)
+	}
+	// The directory actually created on disk must match the sanitized name.
+	expected := filepath.Join(tmp, ".rakitsu", "thinking", "weird_session_id")
+	if store.dir != expected {
+		t.Errorf("store.dir = %q, want %q", store.dir, expected)
+	}
+	if _, err := os.Stat(expected); err != nil {
+		t.Errorf("expected sanitized session dir %s to exist: %v", expected, err)
 	}
 }
 

@@ -48,6 +48,7 @@ func ReconstructHistory(events []telemetry.AgentEvent, upToIndex int) ([]llm.Mes
 				if len(payload.IntendedToolCalls) > 0 {
 					for _, tc := range payload.IntendedToolCalls {
 						msg.ToolCalls = append(msg.ToolCalls, llm.ToolCall{
+							ID:        tc.ID,
 							Name:      tc.Name,
 							Arguments: tc.Arguments,
 						})

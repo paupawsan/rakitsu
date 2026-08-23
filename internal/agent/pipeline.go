@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -72,9 +73,16 @@ func (pc *PipelineContext) clearFrom(levels [][]config.PipelineStep) {
 func buildLevels(steps []config.PipelineStep) ([][]config.PipelineStep, error) {
 	// Inject implicit sequential dependency: steps without explicit depends_on
 	// implicitly depend on the previous step so that YAML order = execution order.
-	// Users can override with explicit depends_on for DAG parallelism.
+	// Users can override with explicit depends_on for DAG parallelism —
+	// including declaring a true parallel root with depends_on: [] (a
+	// non-nil empty slice, which yaml.v3 decodes distinctly from an omitted
+	// field). Checking DependsOn == nil rather than len(...) == 0 is what
+	// makes that override actually work: len() can't tell "not specified"
+	// (nil) apart from "explicitly declared empty" ([]string{}), so a plain
+	// len(...) == 0 check silently overwrote depends_on: [] too, meaning
+	// only steps[0] could ever be a zero-dependency DAG root.
 	for i := 1; i < len(steps); i++ {
-		if len(steps[i].DependsOn) == 0 {
+		if steps[i].DependsOn == nil {
 			steps[i].DependsOn = []string{steps[i-1].Name}
 		}
 	}
@@ -144,6 +152,10 @@ func buildLevels(steps []config.PipelineStep) ([][]config.PipelineStep, error) {
 // executeLevelParallel runs a set of independent steps concurrently and returns
 // the merged output. Mirrors executeParallelStep but operates on a flat level slice.
 func (o *Orchestrator) executeLevelParallel(ctx context.Context, level []config.PipelineStep, pctx *PipelineContext) (string, error) {
+	if dup := o.duplicateAgentInGroup(level); dup != "" {
+		return "", fmt.Errorf("pipeline level cannot run concurrently: agent %q is referenced by more than one step in this level, and agents are not safe for concurrent Run() calls — give each step a distinct agent, or add depends_on to make these steps sequential", dup)
+	}
+
 	type levelResult struct {
 		name   string
 		output string
@@ -168,6 +180,9 @@ func (o *Orchestrator) executeLevelParallel(ctx context.Context, level []config.
 	}
 	wg.Wait()
 
+	// Same "## name\n output\n\n" format as executeParallelStep's merge, so
+	// two adjacent non-empty outputs don't get concatenated directly into
+	// each other with no separator at all.
 	var sb strings.Builder
 	var firstErr error
 	for _, r := range results {
@@ -175,10 +190,32 @@ func (o *Orchestrator) executeLevelParallel(ctx context.Context, level []config.
 			firstErr = r.err
 		}
 		if r.output != "" {
-			sb.WriteString(r.output)
+			sb.WriteString(fmt.Sprintf("## %s\n%s\n\n", r.name, r.output))
 		}
 	}
 	return sb.String(), firstErr
+}
+
+// duplicateAgentInGroup returns the first agent name reachable from more
+// than one step in the group (via stepAgents, which already recurses into
+// nested sub-steps), or "" if every step in the group touches a distinct
+// set of agents. Two steps about to run concurrently that reference the
+// same agent would call Run() on the same singleton *Agent instance from
+// two goroutines at once — with retrieval enabled and the BM25 backend,
+// that reaches an unsynchronized concurrent map read/write in
+// BM25Retriever.Query: fatal error: concurrent map read and map write, an
+// unrecoverable process crash that no recover() can catch.
+func (o *Orchestrator) duplicateAgentInGroup(steps []config.PipelineStep) string {
+	seen := make(map[string]bool)
+	for _, s := range steps {
+		for _, name := range o.stepAgents(s) {
+			if seen[name] {
+				return name
+			}
+			seen[name] = true
+		}
+	}
+	return ""
 }
 
 // runPipeline executes the orchestrator using a deterministic pipeline.
@@ -268,6 +305,21 @@ func (o *Orchestrator) runPipeline(ctx context.Context, query string) (string, e
 				}
 				if targetLevel >= 0 {
 					pctx.clearFrom(levels[targetLevel:])
+					// o.checkpoint.Results is a separate cache from
+					// pctx.Results, consulted by the "RESUME: inject
+					// checkpointed results" block at the top of this loop.
+					// Without also removing these entries, the very next
+					// iteration finds the rerun target's name still present
+					// there and re-injects the stale cached output instead
+					// of actually re-executing it — silently defeating the
+					// rerun request with no error or warning.
+					if o.checkpoint != nil {
+						for _, lv := range levels[targetLevel:] {
+							for _, s := range lv {
+								delete(o.checkpoint.Results, s.Name)
+							}
+						}
+					}
 					levelIdx = targetLevel
 					continue
 				}
@@ -520,6 +572,10 @@ func (o *Orchestrator) executeSequentialStep(ctx context.Context, step config.Pi
 
 // executeParallelStep runs sub-steps concurrently and merges results.
 func (o *Orchestrator) executeParallelStep(ctx context.Context, step config.PipelineStep, pctx *PipelineContext) (string, error) {
+	if dup := o.duplicateAgentInGroup(step.Steps); dup != "" {
+		return "", fmt.Errorf("parallel step %q cannot run: agent %q is referenced by more than one sub-step, and agents are not safe for concurrent Run() calls — give each sub-step a distinct agent, or use type: sequential instead", step.Name, dup)
+	}
+
 	stepCtx := ctx
 	if step.TimeoutSec > 0 {
 		var cancel context.CancelFunc
@@ -528,7 +584,6 @@ func (o *Orchestrator) executeParallelStep(ctx context.Context, step config.Pipe
 	}
 
 	type subResult struct {
-		index  int
 		name   string
 		output string
 		err    error
@@ -543,28 +598,32 @@ func (o *Orchestrator) executeParallelStep(ctx context.Context, step config.Pipe
 			defer wg.Done()
 			defer func() {
 				if r := recover(); r != nil {
-					results[idx] = subResult{
-						index: idx,
-						name:  s.Name,
-						err:   fmt.Errorf("step panic: %v", r),
-					}
+					results[idx] = subResult{name: s.Name, err: fmt.Errorf("step panic: %v", r)}
 				}
 			}()
-			out, err := o.executeSequentialStep(stepCtx, s, pctx)
-			results[idx] = subResult{idx, s.Name, out, err}
+			// Dispatch via executeStep, not executeSequentialStep directly,
+			// so a sub-step nested inside a parallel group can itself be
+			// type: loop or type: parallel — config.PipelineStep.Steps is a
+			// recursive structure that structurally permits this nesting,
+			// but executeSequentialStep only knows how to run a leaf step
+			// (step.Agent != ""); a composite sub-step reaching it failed
+			// with the misleading error `agent "" not found` instead of
+			// actually recursing. executeStep also owns emitting
+			// PIPELINE_STEP_START/END and calling pctx.addResult for this
+			// sub-step (same as executeLoopStep already does for its own
+			// sub-steps), so this goroutine's result is only used for
+			// merging output below, not stored again.
+			out, err := o.executeStep(stepCtx, s, pctx)
+			results[idx] = subResult{name: s.Name, output: out, err: err}
 		}(i, sub)
 	}
 	wg.Wait()
 
-	// Store each sub-step result and merge output
+	// Merge output — each sub-step's result was already recorded on pctx by
+	// executeStep above.
 	var sb strings.Builder
 	var firstErr error
 	for _, r := range results {
-		pctx.addResult(&StepResult{
-			Name:   r.name,
-			Output: r.output,
-			Error:  r.err,
-		})
 		sb.WriteString(fmt.Sprintf("## %s\n%s\n\n", r.name, r.output))
 		if r.err != nil && firstErr == nil {
 			firstErr = r.err
@@ -573,6 +632,19 @@ func (o *Orchestrator) executeParallelStep(ctx context.Context, step config.Pipe
 
 	return sb.String(), firstErr
 }
+
+// loopConditionPassRe matches a leading "PASS" verdict in a condition
+// agent's (uppercased, trimmed) response. Anchored to the start rather than
+// a bare strings.Contains: the condition prompt only asks the model to
+// "answer PASS or FAIL with reasons" — free text, no structured marker — so
+// a response explaining a failure in prose (e.g. "The step FAILED, it does
+// NOT PASS the requirements") contains the substring "PASS" too, and a
+// naive Contains check would misread that as passing, silently accepting
+// unfinished or failing work as complete. Requiring the verdict to lead the
+// response is the standard shape for an explicit PASS/FAIL answer; if a
+// model answers unconventionally (verdict buried after prose) this errs on
+// the safe side — the loop just keeps iterating instead of exiting early.
+var loopConditionPassRe = regexp.MustCompile(`^PASS\b`)
 
 // executeLoopStep iterates sub-steps until condition passes or max iterations reached.
 func (o *Orchestrator) executeLoopStep(ctx context.Context, step config.PipelineStep, pctx *PipelineContext) (string, error) {
@@ -639,7 +711,7 @@ func (o *Orchestrator) executeLoopStep(ctx context.Context, step config.Pipeline
 				return "", fmt.Errorf("condition check failed: %w", err)
 			}
 
-			if strings.Contains(strings.ToUpper(condResult), "PASS") {
+			if loopConditionPassRe.MatchString(strings.ToUpper(strings.TrimSpace(condResult))) {
 				break
 			}
 		}

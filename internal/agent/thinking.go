@@ -21,7 +21,7 @@ func NewThinkingStore(sessionID string) *ThinkingStore {
 	if err != nil {
 		return nil
 	}
-	dir := filepath.Join(home, ".rakitsu", "thinking", sessionID)
+	dir := filepath.Join(home, ".rakitsu", "thinking", sanitizeFileName(sessionID))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil
 	}
@@ -61,7 +61,7 @@ func ThinkingPlaceholder(iteration int, content string) string {
 	truncated := content
 	suffix := ""
 	if len(content) > thinkingPlaceholderMax {
-		truncated = content[:thinkingPlaceholderMax]
+		truncated = truncateUTF8(content, thinkingPlaceholderMax)
 		suffix = "..."
 	}
 	return fmt.Sprintf("[Thought %d: %s%s]", iteration+1, truncated, suffix)
