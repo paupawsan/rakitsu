@@ -160,6 +160,50 @@ func TestResume_AfterResumeDoesNotPauseWithoutBreakpoint(t *testing.T) {
 	}
 }
 
+// TestResume_IgnoredWhenNotPaused regression-guards finding 23: Resume()
+// used to rely solely on "select with default" against resumeCh (buffered,
+// capacity 1) to detect "not paused". A buffered send succeeds even with no
+// waiting receiver, so a stale/late Resume() call issued while the
+// controller was StateRunning would silently land in the buffer instead of
+// being discarded — then get consumed as a spurious pre-armed resume the
+// NEXT time Check() actually paused, skipping that pause instead of
+// blocking for a real decision.
+func TestResume_IgnoredWhenNotPaused(t *testing.T) {
+	bus := telemetry.NewEventBus(8)
+	dc := NewDebugController(bus)
+	dc.SetBreakpoint(BreakpointKey{EventType: "pre_agent", AgentName: "Worker"})
+
+	// Fire a Resume() while nothing is paused — must be discarded, not
+	// buffered into resumeCh.
+	dc.Resume(ActionResume)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		dc.Check(ctx, "pre_agent", "Worker", 0, nil)
+		close(done)
+	}()
+
+	// The stray Resume() above must NOT have pre-armed the pause: Check
+	// should still be blocked waiting for a real decision.
+	select {
+	case <-done:
+		t.Fatal("Check returned immediately — a stale Resume() call before the pause was incorrectly consumed by it")
+	case <-time.After(150 * time.Millisecond):
+		// Good — still paused.
+	}
+
+	// A genuine Resume() issued now must still unblock it.
+	dc.Resume(ActionResume)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Check never unblocked after a real Resume() call")
+	}
+}
+
 func TestWildcardBreakpoint_MatchesAll(t *testing.T) {
 	bus := telemetry.NewEventBus(8)
 	dc := NewDebugController(bus)
@@ -317,5 +361,79 @@ func TestContextCancel_UnblocksPausedAgent(t *testing.T) {
 	err := dc.Check(ctx, "pre_agent", "Worker", 0, nil)
 	if err == nil {
 		t.Error("expected context error after timeout")
+	}
+}
+
+// TestResume_DuplicateCallDoesNotPreArmTheNextPause regression-guards: the
+// GetState() check and the resumeCh send in Resume() used to be two
+// separate synchronized steps, so two Resume() calls arriving close
+// together for the same pause could both observe StatePaused before either
+// send took effect. The second call would then buffer a spurious action
+// that the *next* pause's Check() call reads immediately instead of
+// actually waiting for a real decision — silently skipping that pause.
+// Races two concurrent Resume() calls against one pause across repeated
+// trials, then verifies the following pause genuinely blocks (not
+// pre-armed) until it gets its own, explicit Resume().
+func TestResume_DuplicateCallDoesNotPreArmTheNextPause(t *testing.T) {
+	bus := telemetry.NewEventBus(64)
+	dc := NewDebugController(bus)
+
+	const trials = 50
+	for i := 0; i < trials; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+
+		// First pause: two Resume() calls race to claim it.
+		dc.RequestPause()
+		done1 := make(chan struct{})
+		go func() {
+			defer close(done1)
+			dc.Check(ctx, "pre_thought", "Worker", i, nil)
+		}()
+		time.Sleep(20 * time.Millisecond) // let it reach the paused, blocking state
+
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		wg.Add(2)
+		for j := 0; j < 2; j++ {
+			go func() {
+				defer wg.Done()
+				<-start
+				dc.Resume(ActionResume)
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		select {
+		case <-done1:
+		case <-time.After(time.Second):
+			t.Fatalf("trial %d: first Check() never returned after Resume", i)
+		}
+
+		// Second, independent pause: must genuinely block — a leaked
+		// spurious action from the race above would let it return
+		// immediately instead of waiting for its own Resume() call.
+		dc.RequestPause()
+		done2 := make(chan struct{})
+		go func() {
+			defer close(done2)
+			dc.Check(ctx, "pre_thought", "Worker", i, nil)
+		}()
+
+		select {
+		case <-done2:
+			t.Fatalf("trial %d: second Check() returned without an explicit Resume() — a spurious action leaked from the duplicate-Resume race", i)
+		case <-time.After(80 * time.Millisecond):
+			// Correct: still blocked, waiting for its own resume signal.
+		}
+
+		dc.Resume(ActionResume)
+		select {
+		case <-done2:
+		case <-time.After(time.Second):
+			t.Fatalf("trial %d: second Check() never returned after its own Resume", i)
+		}
+
+		cancel()
 	}
 }

@@ -51,6 +51,142 @@ func TestIsRetryable_RateLimit(t *testing.T) {
 	}
 }
 
+// TestIsRetryable_DoesNotFalsePositiveOnEmbeddedDigits regression-guards
+// finding 27: isRetryable/isRateLimit used to match status codes with bare
+// strings.Contains, so a code's digits appearing as part of a larger
+// number or an alphanumeric token elsewhere in the message (not the actual
+// HTTP status) would wrongly classify a non-retryable error as transient —
+// retrying it 5 times with escalating backoff instead of failing fast.
+func TestIsRetryable_DoesNotFalsePositiveOnEmbeddedDigits(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+	}{
+		{"500 embedded in a duration", "finish_reason=length after 500ms"},
+		{"500 embedded in a larger number", "max_tokens must be between 1 and 4096, got 50000"},
+		{"500 embedded in a port number", "connect tcp 127.0.0.1:8500: no route to host"},
+		{"429 embedded in a duration", "429ms elapsed while waiting for stream"},
+		{"429 embedded in a larger number", "waited 14290 ms for the upstream"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := errors.New(tc.msg)
+			if isRetryable(err) {
+				t.Errorf("isRetryable(%q) = true, want false (status code digits are embedded in a larger token, not a real status code)", tc.msg)
+			}
+			if isRateLimit(err) {
+				t.Errorf("isRateLimit(%q) = true, want false (429 digits are embedded in a larger token, not a real 429)", tc.msg)
+			}
+		})
+	}
+}
+
+// TestIsRetryable_StillMatchesWordBoundedStatusCodes verifies the
+// word-boundary fix didn't regress the real, word-bounded status codes it's
+// meant to keep matching (a bare digit sequence flanked by non-word
+// characters — start/end of string, spaces, punctuation).
+func TestIsRetryable_StillMatchesWordBoundedStatusCodes(t *testing.T) {
+	cases := []string{
+		"429 Too Many Requests",
+		"HTTP/1.1 429",
+		"status: 500",
+		"error (502)",
+		"503.",
+		"504,",
+	}
+	for _, msg := range cases {
+		if !isRetryable(errors.New(msg)) {
+			t.Errorf("isRetryable(%q) = false, want true (word-bounded status code)", msg)
+		}
+	}
+}
+
+// fakeStatusError is a minimal llm.StatusCoder implementation for testing
+// the structured-status-code path in isRetryable/isRateLimit without
+// depending on any real provider SDK's error type.
+type fakeStatusError struct {
+	msg  string
+	code int
+}
+
+func (e *fakeStatusError) Error() string   { return e.msg }
+func (e *fakeStatusError) StatusCode() int { return e.code }
+
+// TestIsRetryable_TrustsStructuredStatusOverMessageText regression-guards a
+// gap the word-boundary fix (finding 27) left open: a word-bounded status
+// code is still ambiguous when it's not actually a status code at all — e.g.
+// a 400 error whose message happens to contain a standalone "500" for an
+// unrelated reason (a token limit, a quota, ...). Text alone can't tell
+// these apart, but a provider error implementing llm.StatusCoder carries the
+// real status, and that must win over whatever numbers appear in the text.
+func TestIsRetryable_TrustsStructuredStatusOverMessageText(t *testing.T) {
+	cases := []struct {
+		name          string
+		code          int
+		msg           string
+		wantRetryable bool
+		wantRateLimit bool
+	}{
+		{
+			name:          "400 with a coincidental word-bounded 500 in the message",
+			code:          400,
+			msg:           "error, status code: 400, status: 400 Bad Request, message: Invalid 'max_tokens': integer below minimum value. Expected a value <= 500, but got a much larger value instead.",
+			wantRetryable: false,
+			wantRateLimit: false,
+		},
+		{
+			name:          "404 with a coincidental word-bounded 429 in the message",
+			code:          404,
+			msg:           "error, status code: 404, message: model 'gpt-429-preview' not found",
+			wantRetryable: false,
+			wantRateLimit: false,
+		},
+		{
+			name:          "real 500 via structured status, no digits in the text at all",
+			code:          500,
+			msg:           "error, status code: 500, message: internal error",
+			wantRetryable: true,
+			wantRateLimit: false,
+		},
+		{
+			name:          "real 429 via structured status",
+			code:          429,
+			msg:           "error, status code: 429, message: rate limited",
+			wantRetryable: true,
+			wantRateLimit: true,
+		},
+		{
+			name:          "501 is not in the retryable set even though it's 5xx",
+			code:          501,
+			msg:           "error, status code: 501, message: not implemented",
+			wantRetryable: false,
+			wantRateLimit: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := &fakeStatusError{msg: tc.msg, code: tc.code}
+			if got := isRetryable(err); got != tc.wantRetryable {
+				t.Errorf("isRetryable() = %v, want %v", got, tc.wantRetryable)
+			}
+			if got := isRateLimit(err); got != tc.wantRateLimit {
+				t.Errorf("isRateLimit() = %v, want %v", got, tc.wantRateLimit)
+			}
+		})
+	}
+}
+
+// TestIsRetryable_FallsBackToTextWhenStatusUnknown verifies an error that
+// implements llm.StatusCoder but reports code 0 (unknown/not an HTTP
+// response — e.g. a network error a provider still chose to wrap) falls
+// through to the same text-based heuristics used for a plain error.
+func TestIsRetryable_FallsBackToTextWhenStatusUnknown(t *testing.T) {
+	err := &fakeStatusError{msg: "connection refused", code: 0}
+	if !isRetryable(err) {
+		t.Error("isRetryable() = false, want true (falls back to text match on unknown status)")
+	}
+}
+
 // --- retryDelay ---
 
 func TestRetryDelay_ExponentialBackoff(t *testing.T) {

@@ -117,6 +117,37 @@ func TestCheckpoint_InvalidSessionIDRejected(t *testing.T) {
 	}
 }
 
+// TestCheckpoint_WriteIsAtomicNoTmpLeak regression-guards finding 20:
+// WriteCheckpoint used to write the checkpoint file directly via
+// os.WriteFile (truncate-then-write in place), unlike SaveChatTree's
+// tmp+rename pattern in the same package — a concurrent LoadCheckpoint
+// (which reads with no lock of its own, since a checkpoint can be loaded
+// for any session id, not just the current one) could observe a
+// half-written file. After a successful write there must be no .tmp file
+// left behind.
+func TestCheckpoint_WriteIsAtomicNoTmpLeak(t *testing.T) {
+	s := newTestStore(t)
+	startTestSession(t, s)
+
+	if err := s.WriteCheckpoint(StoreCheckpointData{
+		SessionID:      s.CurrentSessionID(),
+		CompletedSteps: []string{"plan"},
+		Results:        map[string]StoreStepResult{},
+	}); err != nil {
+		t.Fatalf("WriteCheckpoint: %v", err)
+	}
+
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Fatalf("stray tmp file after WriteCheckpoint: %s", e.Name())
+		}
+	}
+}
+
 func TestCheckpoint_WriteRequiresActiveSession(t *testing.T) {
 	s := newTestStore(t)
 	// No session started
@@ -160,6 +191,95 @@ func TestDeleteSession_NoCheckpointIsNoop(t *testing.T) {
 	// No checkpoint written — delete should still succeed
 	if err := s.DeleteSession(id); err != nil {
 		t.Errorf("DeleteSession without checkpoint should not error: %v", err)
+	}
+}
+
+// TestDeleteSession_RemovesChatTree regression-guards against a .chat.json
+// blob being left orphaned on disk forever: DeleteSession already removed
+// the .jsonl and .checkpoint.json files for a session but not its chat tree
+// blob, which is keyed by the same session id and tracked nowhere else.
+func TestDeleteSession_RemovesChatTree(t *testing.T) {
+	s := newTestStore(t)
+	id := startTestSession(t, s)
+
+	if err := s.SaveChatTree(id, []byte(`{"tree":{}}`)); err != nil {
+		t.Fatalf("SaveChatTree: %v", err)
+	}
+	s.EndSession(SessionSuccess)
+
+	if err := s.DeleteSession(id); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+
+	if _, err := s.LoadChatTree(id); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("chat tree should be removed after DeleteSession, LoadChatTree err = %v", err)
+	}
+}
+
+// TestDeleteSession_ConcurrentWithStartSessionIndexRace regression-guards
+// finding 19: DeleteSession used to read-modify-write sessions.json without
+// holding s.mu, so on one shared *SessionStore instance (the shape
+// `rakitsu serve`'s hub actually uses — one store, API delete handlers and
+// the runner's StartSession/EndSession calls all running as goroutines
+// against it) DeleteSession could race a concurrent StartSession/EndSession
+// (which do hold s.mu around their own index read-modify-write) and lose
+// one side's update. Deletes half of a batch of sessions concurrently with
+// starting+ending a fresh batch on the SAME store instance, and asserts the
+// index ends up with exactly the sessions that should have survived — a
+// lost update would under- or over-count. The StartSession/EndSession pairs
+// are serialized against each other via startMu (a single active session is
+// a store-wide invariant unrelated to this finding); only DeleteSession is
+// left free to interleave with them, which is what this test targets.
+func TestDeleteSession_ConcurrentWithStartSessionIndexRace(t *testing.T) {
+	s := newTestStore(t)
+
+	const n = 20
+	ids := make([]string, n)
+	for i := range ids {
+		if err := s.StartSession(SessionMeta{Name: fmt.Sprintf("pre-%d", i), Query: "q"}); err != nil {
+			t.Fatalf("StartSession: %v", err)
+		}
+		ids[i] = s.CurrentSessionID()
+		s.EndSession(SessionSuccess)
+	}
+
+	var wg sync.WaitGroup
+	var startMu sync.Mutex // serializes StartSession/EndSession pairs against each other only
+
+	// Delete the first half concurrently with starting+ending a second
+	// batch of brand-new sessions, all against the same store instance.
+	for i := 0; i < n/2; i++ {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			if err := s.DeleteSession(id); err != nil {
+				t.Errorf("DeleteSession(%s): %v", id, err)
+			}
+		}(ids[i])
+	}
+	for i := 0; i < n/2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			startMu.Lock()
+			defer startMu.Unlock()
+			if err := s.StartSession(SessionMeta{Name: fmt.Sprintf("post-%d", i), Query: "q"}); err != nil {
+				t.Errorf("StartSession: %v", err)
+				return
+			}
+			s.EndSession(SessionSuccess)
+		}(i)
+	}
+	wg.Wait()
+
+	list, err := s.ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	// n/2 pre-sessions survived deletion of the other half, plus n/2 new
+	// post-sessions were added: n total either way.
+	if len(list) != n {
+		t.Errorf("ListSessions returned %d entries, want %d (a lost update during concurrent index writes would under/over-count)", len(list), n)
 	}
 }
 
@@ -405,6 +525,127 @@ func TestCheckpoint_Stress100Steps(t *testing.T) {
 	}
 	if len(loaded.Results) != totalSteps {
 		t.Errorf("Results len = %d, want %d", len(loaded.Results), totalSteps)
+	}
+}
+
+// TestWriteIndex_WriteIsAtomicNoTmpLeak mirrors TestCheckpoint_WriteIsAtomicNoTmpLeak
+// above for sessions.json's own writer.
+func TestWriteIndex_WriteIsAtomicNoTmpLeak(t *testing.T) {
+	s := newTestStore(t)
+	startTestSession(t, s)
+	s.EndSession(SessionSuccess)
+
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Fatalf("stray tmp file after StartSession/EndSession: %s", e.Name())
+		}
+	}
+}
+
+// TestGetSessionListSessions_ConcurrentWithWrites_NoCorruptIndexRead stresses
+// GetSession/ListSessions against concurrent StartSession/EndSession writes
+// to the same sessions.json. Before this fix, GetSession/ListSessions called
+// readIndex() outside s.mu and writeIndex wrote via a plain, non-atomic
+// os.WriteFile — a read landing mid-write could observe a truncated file and
+// fail with "corrupt sessions index". Neither is guaranteed to reproduce on
+// every run (this is real filesystem timing, not a Go memory race the
+// detector can flag), but this is the same class of stress proof already
+// established by TestDeleteSession_ConcurrentWithStartSessionIndexRace above
+// for the write/write side of this exact file.
+func TestGetSessionListSessions_ConcurrentWithWrites_NoCorruptIndexRead(t *testing.T) {
+	s := newTestStore(t)
+
+	const n = 30
+	ids := make([]string, n)
+	for i := range ids {
+		if err := s.StartSession(SessionMeta{Name: fmt.Sprintf("pre-%d", i), Query: "q"}); err != nil {
+			t.Fatalf("StartSession: %v", err)
+		}
+		ids[i] = s.CurrentSessionID()
+		s.EndSession(SessionSuccess)
+	}
+
+	var wg sync.WaitGroup
+	var startMu sync.Mutex // serializes StartSession/EndSession pairs against each other only
+
+	for i := 0; i < n; i++ {
+		wg.Add(3)
+		go func(id string) {
+			defer wg.Done()
+			if _, err := s.ListSessions(); err != nil {
+				t.Errorf("ListSessions: %v", err)
+			}
+		}(ids[i])
+		go func(id string) {
+			defer wg.Done()
+			if _, err := s.GetSession(id); err != nil && strings.Contains(err.Error(), "corrupt sessions index") {
+				t.Errorf("GetSession(%s): %v", id, err)
+			}
+		}(ids[i])
+		go func(i int) {
+			defer wg.Done()
+			startMu.Lock()
+			defer startMu.Unlock()
+			if err := s.StartSession(SessionMeta{Name: fmt.Sprintf("post-%d", i), Query: "q"}); err != nil {
+				t.Errorf("StartSession: %v", err)
+				return
+			}
+			s.EndSession(SessionSuccess)
+		}(i)
+	}
+	wg.Wait()
+}
+
+// TestDeleteSession_CheckpointNotRecreatedByRacingWriteCheckpoint regression-
+// guards against DeleteSession's checkpoint-file removal running unlocked,
+// where a WriteCheckpoint call could complete entirely inside that window
+// and recreate the file for a session that's mid-deletion, orphaning it
+// with no index entry pointing at it. Many independent trials, each racing
+// one WriteCheckpoint against one DeleteSession for a fresh session, to
+// give the timing-dependent window many chances to manifest.
+func TestDeleteSession_CheckpointNotRecreatedByRacingWriteCheckpoint(t *testing.T) {
+	const trials = 200
+	recreated := 0
+	for i := 0; i < trials; i++ {
+		s := newTestStore(t)
+		id := startTestSession(t, s)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = s.WriteCheckpoint(StoreCheckpointData{
+				SessionID:      id,
+				CompletedSteps: []string{"step"},
+				Results:        map[string]StoreStepResult{},
+			})
+		}()
+		go func() {
+			defer wg.Done()
+			if err := s.DeleteSession(id); err != nil {
+				t.Errorf("trial %d: DeleteSession: %v", i, err)
+			}
+		}()
+		wg.Wait()
+
+		if s.HasCheckpoint(id) {
+			recreated++
+		}
+	}
+	// A handful of survivals are expected and not a bug: when the single
+	// WriteCheckpoint call happens to finish strictly after DeleteSession
+	// already returned, the file legitimately exists again (a caller
+	// checkpointing an already-deleted session is a separate, out-of-scope
+	// concern — see the fix's issue). The bug this guards against is the
+	// checkpoint surviving on essentially *every* trial, because the old
+	// code's unlocked removal window let a racing write win far more often
+	// than genuine sequencing-after would predict.
+	if recreated > trials/4 {
+		t.Errorf("checkpoint file survived DeleteSession in %d/%d trials — expected only occasional legitimate write-after-delete, not this many; the removal likely isn't properly locked against WriteCheckpoint", recreated, trials)
 	}
 }
 

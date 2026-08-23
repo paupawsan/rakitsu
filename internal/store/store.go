@@ -198,19 +198,22 @@ func (s *SessionStore) CurrentSessionID() string {
 
 // ListSessions returns all sessions, newest first.
 func (s *SessionStore) ListSessions() ([]SessionMeta, error) {
-	sessions, err := s.readIndex()
-	if err != nil {
-		return nil, err
-	}
-
-	// Mark orphaned "running" sessions as stale (not the current active session)
+	// readIndex is held under s.mu for its whole call, not just the
+	// s.current.ID read afterward — StartSession/EndSession/DeleteSession
+	// all write sessions.json under this same lock, and an unlocked read
+	// landing mid-write could otherwise observe a truncated file.
 	s.mu.Lock()
+	sessions, err := s.readIndex()
 	currentID := ""
 	if s.current != nil {
 		currentID = s.current.ID
 	}
 	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
 
+	// Mark orphaned "running" sessions as stale (not the current active session)
 	for i := range sessions {
 		if sessions[i].Status == SessionRunning && sessions[i].ID != currentID {
 			sessions[i].Status = SessionStale
@@ -224,16 +227,31 @@ func (s *SessionStore) ListSessions() ([]SessionMeta, error) {
 	return sessions, nil
 }
 
-// GetSession returns metadata for a single session.
+// GetSession returns metadata for a single session. Applies the same
+// orphaned-"running"-session reclassification as ListSessions, so a session
+// left "running" by a crashed process (any session ID other than the
+// current active one) reports as stale here too, instead of GetSession and
+// ListSessions disagreeing about the same session's status.
 func (s *SessionStore) GetSession(id string) (*SessionMeta, error) {
+	// Same locked-readIndex reasoning as ListSessions above.
+	s.mu.Lock()
 	sessions, err := s.readIndex()
+	currentID := ""
+	if s.current != nil {
+		currentID = s.current.ID
+	}
+	s.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
 
 	for i := range sessions {
 		if sessions[i].ID == id {
-			return &sessions[i], nil
+			meta := sessions[i]
+			if meta.Status == SessionRunning && meta.ID != currentID {
+				meta.Status = SessionStale
+			}
+			return &meta, nil
 		}
 	}
 	return nil, fmt.Errorf("session not found: %s", id)
@@ -302,7 +320,20 @@ func (s *SessionStore) writeIndex(sessions []SessionMeta) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.indexPath(), data, 0644)
+	// tmp+rename, same as WriteCheckpoint below — a plain os.WriteFile
+	// truncates the file before writing the new content, so a reader
+	// landing mid-write (even one holding s.mu, briefly, between the
+	// truncate and the write completing) could observe a corrupt file.
+	path := s.indexPath()
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return fmt.Errorf("write index: write tmp: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("write index: rename: %w", err)
+	}
+	return nil
 }
 
 func (s *SessionStore) appendToIndex(meta SessionMeta) error {
@@ -332,21 +363,49 @@ func (s *SessionStore) updateIndex(meta SessionMeta) error {
 	return s.writeIndex(sessions)
 }
 
-// DeleteSession removes a session, its JSONL file, and checkpoint file.
+// DeleteSession removes a session, its JSONL file, checkpoint file, and chat
+// tree blob.
 func (s *SessionStore) DeleteSession(id string) error {
 	// Sanitize the id to prevent path traversal
 	if strings.ContainsAny(id, "/\\..") {
 		return fmt.Errorf("invalid session id")
 	}
 
-	// Remove JSONL file
+	// Remove JSONL file. Unlocked: nothing writes new content to an already-
+	// ended session's .jsonl after EndSession finishes, so there's no
+	// concurrent writer to race here.
 	path := filepath.Join(s.dir, id+".jsonl")
 	os.Remove(path)
 
-	// Remove checkpoint file if present (best-effort)
+	// Remove chat tree blob if present (best-effort) — like the checkpoint
+	// file below, this is an out-of-band artifact keyed by session id that
+	// isn't tracked in the JSONL or index, and would otherwise be left
+	// orphaned on disk forever once the session itself is deleted.
+	// Unlocked, and stays that way: SaveChatTree is deliberately lock-free
+	// (its own doc comment — safe to call from any goroutine, independent
+	// of the JSONL lifecycle) so a delete racing a concurrent SaveChatTree
+	// for the same id can still leave a recreated .chat.json behind. s.mu
+	// is a single store-wide mutex; making SaveChatTree take it to close
+	// this would serialize every concurrent chat-tree save across every
+	// live session, not just this one — out of scope for this fix.
+	if chatPath, err := s.chatTreePath(id); err == nil {
+		os.Remove(chatPath)
+	}
+
+	// Update index and remove the checkpoint file. Both locked so they're
+	// properly serialized against a concurrent StartSession/EndSession
+	// (which mutate sessions.json under s.mu via appendToIndex/updateIndex),
+	// a concurrent DeleteSession, and — for the checkpoint file specifically
+	// — a concurrent WriteCheckpoint (same mutex, held for its whole body).
+	// Without holding the lock across the checkpoint removal too, a
+	// WriteCheckpoint racing in the window between an unlocked os.Remove and
+	// this Lock() call could recreate the file for a session that's mid-
+	// deletion, orphaning it with no index entry pointing at it.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	os.Remove(filepath.Join(s.dir, id+".checkpoint.json"))
 
-	// Update index
 	sessions, err := s.readIndex()
 	if err != nil {
 		return err
@@ -447,6 +506,13 @@ type StoreStepResult struct {
 
 // WriteCheckpoint atomically writes (or overwrites) the checkpoint file for the
 // current session. Safe to call after every pipeline step.
+//
+// Held for the whole write, not just the s.current.ID read: multiple
+// pipeline steps can call this concurrently for the same session, and they
+// all share the same ".tmp" path (see below), so without the lock two
+// overlapping writes could stomp on each other's tmp file before either
+// rename runs. This also serializes against DeleteSession, which now takes
+// s.mu around its own checkpoint-file removal.
 func (s *SessionStore) WriteCheckpoint(data StoreCheckpointData) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -459,8 +525,22 @@ func (s *SessionStore) WriteCheckpoint(data StoreCheckpointData) error {
 	if err != nil {
 		return err
 	}
+
+	// Tmp+rename — same atomic pattern as SaveChatTree — instead of a
+	// direct os.WriteFile (which truncates then writes in place). Without
+	// it, LoadCheckpoint — which reads by session id with no lock of its
+	// own, since a checkpoint can be loaded for any session, not just the
+	// current one — could observe a half-written file if it runs mid-write.
 	path := filepath.Join(s.dir, s.current.ID+".checkpoint.json")
-	return os.WriteFile(path, b, 0644)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0644); err != nil {
+		return fmt.Errorf("checkpoint: write tmp: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("checkpoint: rename: %w", err)
+	}
+	return nil
 }
 
 // HasCheckpoint returns true when a resumable checkpoint file exists for the session.
