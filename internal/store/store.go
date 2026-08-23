@@ -1,0 +1,492 @@
+// Package store provides persistent session storage for agent execution traces.
+package store
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/paupawsan/rakitsu/internal/telemetry"
+)
+
+// SessionStatus represents the final state of a session.
+type SessionStatus string
+
+const (
+	SessionRunning SessionStatus = "running"
+	SessionSuccess SessionStatus = "success"
+	SessionError   SessionStatus = "error"
+	SessionTimeout SessionStatus = "timeout"
+	SessionStale   SessionStatus = "stale"
+)
+
+// SessionMeta holds metadata about a session.
+type SessionMeta struct {
+	ID          string        `json:"id"`
+	ProjectID   string        `json:"project_id,omitempty"`
+	Name        string        `json:"name"`
+	Query       string        `json:"query"`
+	ConfigPath  string        `json:"config_path"`
+	ConfigYAML  string        `json:"config_yaml,omitempty"`
+	Workdir     string        `json:"workdir,omitempty"`
+	Agents      []string      `json:"agents"`
+	StartTime   time.Time     `json:"start_time"`
+	EndTime     *time.Time    `json:"end_time,omitempty"`
+	Status      SessionStatus `json:"status"`
+	TotalTokens int           `json:"total_tokens"`
+	TotalEvents int           `json:"total_events"`
+	DurationMs  int64         `json:"duration_ms"`
+}
+
+// SessionStore manages session persistence to ~/.rakitsu/sessions/.
+type SessionStore struct {
+	dir         string
+	mu          sync.Mutex
+	current     *SessionMeta
+	file        *os.File
+	eventCount  int
+	totalTokens int
+}
+
+// NewSessionStore creates a session store at ~/.rakitsu/sessions/.
+func NewSessionStore() (*SessionStore, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("cannot resolve home directory: %w", err)
+	}
+
+	dir := filepath.Join(home, ".rakitsu", "sessions")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("cannot create sessions directory: %w", err)
+	}
+
+	return &SessionStore{dir: dir}, nil
+}
+
+// StartSession begins recording a new session.
+func (s *SessionStore) StartSession(meta SessionMeta) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	meta.ID = uuid.New().String()
+	meta.StartTime = time.Now()
+	meta.Status = SessionRunning
+
+	// Open JSONL file
+	path := filepath.Join(s.dir, meta.ID+".jsonl")
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("cannot create session file: %w", err)
+	}
+
+	// Write metadata as first line
+	line, err := json.Marshal(meta)
+	if err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := fmt.Fprintf(f, "%s\n", line); err != nil {
+		f.Close()
+		return err
+	}
+
+	s.file = f
+	s.current = &meta
+	s.eventCount = 0
+	s.totalTokens = 0
+
+	// Append to sessions index
+	return s.appendToIndex(meta)
+}
+
+// WriteEvent writes an event to the current session JSONL file.
+func (s *SessionStore) WriteEvent(event telemetry.AgentEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.file == nil {
+		return
+	}
+
+	line, err := json.Marshal(event)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "session store: marshal error: %v\n", err)
+		return
+	}
+
+	if _, err := fmt.Fprintf(s.file, "%s\n", line); err != nil {
+		fmt.Fprintf(os.Stderr, "session store: write error: %v\n", err)
+		return
+	}
+
+	s.eventCount++
+	if event.TokenUsage != nil {
+		s.totalTokens += event.TokenUsage.TotalTokens
+	}
+}
+
+// EndSession finalizes the current session with status and totals.
+func (s *SessionStore) EndSession(status SessionStatus) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.current == nil {
+		return
+	}
+
+	now := time.Now()
+	s.current.EndTime = &now
+	s.current.Status = status
+	s.current.TotalEvents = s.eventCount
+	s.current.TotalTokens = s.totalTokens
+	s.current.DurationMs = now.Sub(s.current.StartTime).Milliseconds()
+
+	if s.file != nil {
+		// Write SESSION_END as the last JSONL line so consumers reading the
+		// stream alone (without sessions.json) can determine final status from
+		// the last line. Line-1 SessionMeta stays Status:"running" forever
+		// because JSONL is append-only.
+		if payload, err := json.Marshal(telemetry.SessionEndPayload{
+			Status:      telemetry.SessionEndStatus(status),
+			TotalEvents: s.eventCount,
+			TotalTokens: s.totalTokens,
+			DurationMs:  s.current.DurationMs,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "session store: SESSION_END payload marshal error: %v\n", err)
+		} else {
+			endEvent := telemetry.AgentEvent{
+				ID:        uuid.New().String(),
+				Timestamp: now,
+				EventType: telemetry.EventSessionEnd,
+				SessionID: s.current.ID,
+				Payload:   payload,
+			}
+			if line, err := json.Marshal(endEvent); err != nil {
+				fmt.Fprintf(os.Stderr, "session store: SESSION_END marshal error: %v\n", err)
+			} else if _, err := fmt.Fprintf(s.file, "%s\n", line); err != nil {
+				fmt.Fprintf(os.Stderr, "session store: SESSION_END write error: %v\n", err)
+			}
+		}
+
+		s.file.Close()
+		s.file = nil
+	}
+
+	// Update index with final metadata
+	if err := s.updateIndex(*s.current); err != nil {
+		fmt.Fprintf(os.Stderr, "session store: index update error: %v\n", err)
+	}
+
+	s.current = nil
+}
+
+// CurrentSessionID returns the ID of the active session, if any.
+func (s *SessionStore) CurrentSessionID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.current == nil {
+		return ""
+	}
+	return s.current.ID
+}
+
+// ListSessions returns all sessions, newest first.
+func (s *SessionStore) ListSessions() ([]SessionMeta, error) {
+	sessions, err := s.readIndex()
+	if err != nil {
+		return nil, err
+	}
+
+	// Mark orphaned "running" sessions as stale (not the current active session)
+	s.mu.Lock()
+	currentID := ""
+	if s.current != nil {
+		currentID = s.current.ID
+	}
+	s.mu.Unlock()
+
+	for i := range sessions {
+		if sessions[i].Status == SessionRunning && sessions[i].ID != currentID {
+			sessions[i].Status = SessionStale
+		}
+	}
+
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].StartTime.After(sessions[j].StartTime)
+	})
+
+	return sessions, nil
+}
+
+// GetSession returns metadata for a single session.
+func (s *SessionStore) GetSession(id string) (*SessionMeta, error) {
+	sessions, err := s.readIndex()
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range sessions {
+		if sessions[i].ID == id {
+			return &sessions[i], nil
+		}
+	}
+	return nil, fmt.Errorf("session not found: %s", id)
+}
+
+// GetSessionEvents returns all agent execution events for a session by
+// reading its JSONL file. The line-1 SessionMeta and the trailing SESSION_END
+// marker are both excluded — the returned slice contains only events that
+// were emitted via WriteEvent during agent execution. With this filter,
+// len(events) == SessionEndPayload.TotalEvents.
+func (s *SessionStore) GetSessionEvents(id string) ([]telemetry.AgentEvent, error) {
+	path := filepath.Join(s.dir, id+".jsonl")
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("session file not found: %w", err)
+	}
+	defer f.Close()
+
+	var events []telemetry.AgentEvent
+	dec := json.NewDecoder(f)
+
+	// Skip first object (session metadata line)
+	var skip json.RawMessage
+	if err := dec.Decode(&skip); err != nil {
+		return events, nil // empty or unreadable file
+	}
+
+	for dec.More() {
+		var event telemetry.AgentEvent
+		if err := dec.Decode(&event); err != nil {
+			continue // skip malformed entries
+		}
+		if event.EventType == telemetry.EventSessionEnd {
+			continue // session-lifecycle marker, not an agent event
+		}
+		events = append(events, event)
+	}
+
+	return events, nil
+}
+
+// --- index helpers ---
+
+func (s *SessionStore) indexPath() string {
+	return filepath.Join(s.dir, "sessions.json")
+}
+
+func (s *SessionStore) readIndex() ([]SessionMeta, error) {
+	data, err := os.ReadFile(s.indexPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var sessions []SessionMeta
+	if err := json.Unmarshal(data, &sessions); err != nil {
+		return nil, fmt.Errorf("corrupt sessions index: %w", err)
+	}
+	return sessions, nil
+}
+
+func (s *SessionStore) writeIndex(sessions []SessionMeta) error {
+	data, err := json.MarshalIndent(sessions, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(s.indexPath(), data, 0644)
+}
+
+func (s *SessionStore) appendToIndex(meta SessionMeta) error {
+	sessions, err := s.readIndex()
+	if err != nil {
+		return err
+	}
+	sessions = append(sessions, meta)
+	return s.writeIndex(sessions)
+}
+
+func (s *SessionStore) updateIndex(meta SessionMeta) error {
+	sessions, err := s.readIndex()
+	if err != nil {
+		return err
+	}
+
+	for i := range sessions {
+		if sessions[i].ID == meta.ID {
+			sessions[i] = meta
+			return s.writeIndex(sessions)
+		}
+	}
+
+	// Not found — append (shouldn't happen but safe fallback)
+	sessions = append(sessions, meta)
+	return s.writeIndex(sessions)
+}
+
+// DeleteSession removes a session, its JSONL file, and checkpoint file.
+func (s *SessionStore) DeleteSession(id string) error {
+	// Sanitize the id to prevent path traversal
+	if strings.ContainsAny(id, "/\\..") {
+		return fmt.Errorf("invalid session id")
+	}
+
+	// Remove JSONL file
+	path := filepath.Join(s.dir, id+".jsonl")
+	os.Remove(path)
+
+	// Remove checkpoint file if present (best-effort)
+	os.Remove(filepath.Join(s.dir, id+".checkpoint.json"))
+
+	// Update index
+	sessions, err := s.readIndex()
+	if err != nil {
+		return err
+	}
+
+	filtered := sessions[:0]
+	for _, sess := range sessions {
+		if sess.ID != id {
+			filtered = append(filtered, sess)
+		}
+	}
+
+	return s.writeIndex(filtered)
+}
+
+// --- chat tree helpers ---
+
+// chatTreePath resolves the on-disk path for a chat session's persisted
+// branching turn history. Sanitizes the id against path-traversal — same
+// guard DeleteSession/LoadCheckpoint use.
+func (s *SessionStore) chatTreePath(id string) (string, error) {
+	if id == "" {
+		return "", fmt.Errorf("invalid session id")
+	}
+	if strings.ContainsAny(id, "/\\..") {
+		return "", fmt.Errorf("invalid session id")
+	}
+	return filepath.Join(s.dir, id+".chat.json"), nil
+}
+
+// SaveChatTree atomically writes a chat session's branching turn history
+// blob to ~/.rakitsu/sessions/{id}.chat.json. Tmp+rename guarantees readers
+// never see a half-written file. The bytes are opaque to the store; the
+// server layer owns marshaling.
+//
+// Independent of the JSONL session lifecycle: safe to call without an
+// active StartSession, and from any goroutine.
+func (s *SessionStore) SaveChatTree(id string, raw []byte) error {
+	path, err := s.chatTreePath(id)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0644); err != nil {
+		return fmt.Errorf("chat tree: write tmp: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("chat tree: rename: %w", err)
+	}
+	return nil
+}
+
+// maxChatTreeSize caps how large a .chat.json blob LoadChatTree will
+// read into memory. Defense in depth: a corrupt or accidentally
+// unbounded tree (e.g. a producer bug that loops AppendTurn) should
+// fail loud at load time instead of OOM'ing the serve process on
+// resume. 64 MiB comfortably accommodates a 50k-turn conversation with
+// 1 KB-average UserText + entries; well above any realistic chat.
+const maxChatTreeSize = 64 << 20
+
+// LoadChatTree reads the persisted chat tree blob for a session. The
+// underlying os.ReadFile error is returned unwrapped on miss so callers
+// can detect "no prior chat" via errors.Is(err, os.ErrNotExist). Files
+// larger than maxChatTreeSize are rejected before any memory is
+// allocated to read them.
+func (s *SessionStore) LoadChatTree(id string) ([]byte, error) {
+	path, err := s.chatTreePath(id)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > maxChatTreeSize {
+		return nil, fmt.Errorf("chat tree: %s is %d bytes (exceeds %d-byte cap)", path, info.Size(), maxChatTreeSize)
+	}
+	return os.ReadFile(path)
+}
+
+// --- checkpoint helpers ---
+
+// StoreCheckpointData is the on-disk JSON representation of pipeline checkpoint state.
+type StoreCheckpointData struct {
+	SessionID      string                     `json:"session_id"`
+	Query          string                     `json:"query"`
+	CompletedSteps []string                   `json:"completed_steps"`
+	Results        map[string]StoreStepResult `json:"results"`
+}
+
+// StoreStepResult is the persisted form of one completed pipeline step.
+type StoreStepResult struct {
+	Name       string `json:"name"`
+	Output     string `json:"output"`
+	DurationNs int64  `json:"duration_ns"`
+}
+
+// WriteCheckpoint atomically writes (or overwrites) the checkpoint file for the
+// current session. Safe to call after every pipeline step.
+func (s *SessionStore) WriteCheckpoint(data StoreCheckpointData) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.current == nil {
+		return fmt.Errorf("no active session")
+	}
+
+	b, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(s.dir, s.current.ID+".checkpoint.json")
+	return os.WriteFile(path, b, 0644)
+}
+
+// HasCheckpoint returns true when a resumable checkpoint file exists for the session.
+func (s *SessionStore) HasCheckpoint(sessionID string) bool {
+	if strings.ContainsAny(sessionID, "/\\..") {
+		return false
+	}
+	path := filepath.Join(s.dir, sessionID+".checkpoint.json")
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// LoadCheckpoint reads the checkpoint file for the given session ID.
+// Returns an error wrapping os.ErrNotExist if no checkpoint exists.
+func (s *SessionStore) LoadCheckpoint(sessionID string) (*StoreCheckpointData, error) {
+	if strings.ContainsAny(sessionID, "/\\..") {
+		return nil, fmt.Errorf("invalid session id")
+	}
+	path := filepath.Join(s.dir, sessionID+".checkpoint.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("checkpoint not found for session %s: %w", sessionID, err)
+	}
+	var data StoreCheckpointData
+	if err := json.Unmarshal(b, &data); err != nil {
+		return nil, fmt.Errorf("corrupt checkpoint for session %s: %w", sessionID, err)
+	}
+	return &data, nil
+}
