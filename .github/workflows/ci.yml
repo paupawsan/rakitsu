@@ -1,5 +1,11 @@
-# Interim CI: Go build/vet/test only. Frontend and packaging steps will be
-# added once those parts of the tree land in later ports.
+# Interim CI: Go build/vet/test only. The project's own frontend build
+# steps and full packaging pipeline will be added once the frontend source
+# (web/) has landed.
+#
+# internal/webui embeds the built frontend via `//go:embed all:dist`, which
+# needs at least one file under dist/ to compile — the placeholder step
+# below stands in for the real "build frontend, embed it" step until the
+# frontend source ships.
 name: CI
 
 on:
@@ -23,6 +29,11 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: 'go.mod'
+
+      - name: Placeholder frontend (real one lands at a later rung)
+        run: |
+          mkdir -p internal/webui/dist
+          echo '<!doctype html><title>rakitsu</title><p>Frontend not yet ported — see the port series in this repo'"'"'s PR history.</p>' > internal/webui/dist/index.html
 
       - name: Go tests
         run: go test ./...
