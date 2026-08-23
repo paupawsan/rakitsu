@@ -191,7 +191,7 @@ func (p *Provider) generate(
 
 	resp, err := p.client.Models.GenerateContent(ctx, model, contents, config)
 	if err != nil {
-		return nil, fmt.Errorf("gemini API error: %w", err)
+		return nil, wrapAPIError("gemini API error", err)
 	}
 
 	return p.parseResponse(resp), nil

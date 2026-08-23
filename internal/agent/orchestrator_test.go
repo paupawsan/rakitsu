@@ -10,6 +10,7 @@ import (
 
 	"github.com/paupawsan/rakitsu/internal/config"
 	"github.com/paupawsan/rakitsu/internal/telemetry"
+	"github.com/paupawsan/rakitsu/internal/tools"
 )
 
 // ============================================================
@@ -461,5 +462,81 @@ func TestDelegationTool_WithSubOrchestrator(t *testing.T) {
 	}
 	if !strings.Contains(result, "delegated-result") {
 		t.Errorf("expected 'delegated-result', got %q", result)
+	}
+}
+
+// ============================================================
+// Delegation tool name collisions
+// ============================================================
+
+// TestOrchestrator_SanitizedToolNameCollision_BothAgentsStayReachable
+// regression-guards: distinct agent names that sanitize to the same tool
+// name (e.g. "Foo.Bar" and "foo_bar" both become "foo_bar") used to let the
+// second-registered agent silently overwrite the first's delegation tool —
+// ToolRegistry.RegisterTool only logs on a same-name overwrite, it doesn't
+// error — leaving the first agent permanently unreachable via delegation
+// with nothing surfacing the collision anywhere. registerDelegationTools,
+// getDelegationToolNames, and buildSystemPrompt must now all agree on a
+// disambiguated (_2, _3, ...) name for the second agent, so both stay
+// reachable and advertised consistently.
+func TestOrchestrator_SanitizedToolNameCollision_BothAgentsStayReachable(t *testing.T) {
+	bus := telemetry.NewEventBus(64)
+	agentA := &salvageFakeAgent{name: "Foo.Bar", answer: "from-a"}
+	agentB := &salvageFakeAgent{name: "foo_bar", answer: "from-b"}
+
+	orch := &Orchestrator{
+		name:         "Supervisor",
+		strategy:     "Hierarchical",
+		systemPrompt: "base prompt",
+		agentNames:   []string{"Foo.Bar", "foo_bar"},
+		agents: map[string]Runner{
+			"Foo.Bar": agentA,
+			"foo_bar": agentB,
+		},
+		eventBus: bus,
+	}
+
+	// Both sanitize to "foo_bar" alone; resolvedToolNames must disambiguate.
+	resolved := orch.resolvedToolNames()
+	nameA, nameB := resolved["Foo.Bar"], resolved["foo_bar"]
+	if nameA == "" || nameB == "" {
+		t.Fatalf("resolvedToolNames() missing an entry: %+v", resolved)
+	}
+	if nameA == nameB {
+		t.Fatalf("resolvedToolNames() gave both agents the same tool name %q — one is unreachable", nameA)
+	}
+
+	// getDelegationToolNames must return two distinct, "delegate_to_"-prefixed names.
+	toolList := orch.getDelegationToolNames()
+	if len(toolList) != 2 || toolList[0] == toolList[1] {
+		t.Fatalf("getDelegationToolNames() = %v, want 2 distinct entries", toolList)
+	}
+
+	// registerDelegationTools must register both agents under distinct,
+	// independently resolvable tool names — neither RegisterTool call may
+	// overwrite the other.
+	registry := tools.NewToolRegistry()
+	orch.registerDelegationTools(registry, &orchestratorRunState{})
+
+	toolA := registry.GetTool("delegate_to_" + nameA)
+	toolB := registry.GetTool("delegate_to_" + nameB)
+	if toolA == nil || toolB == nil {
+		t.Fatalf("registry missing a tool: delegate_to_%s=%v delegate_to_%s=%v", nameA, toolA != nil, nameB, toolB != nil)
+	}
+	dtA, okA := toolA.(*DelegationTool)
+	dtB, okB := toolB.(*DelegationTool)
+	if !okA || !okB {
+		t.Fatalf("registered tools are not *DelegationTool: %T, %T", toolA, toolB)
+	}
+	if dtA.agent.GetName() != "Foo.Bar" || dtB.agent.GetName() != "foo_bar" {
+		t.Errorf("registered tools point at the wrong agents: %q, %q", dtA.agent.GetName(), dtB.agent.GetName())
+	}
+
+	// buildSystemPrompt must advertise the same two resolved names, not the
+	// raw (colliding) sanitizeToolName output — otherwise the LLM would be
+	// told about a tool name that was never actually registered.
+	prompt := orch.buildSystemPrompt()
+	if !strings.Contains(prompt, "delegate_to_"+nameA) || !strings.Contains(prompt, "delegate_to_"+nameB) {
+		t.Errorf("buildSystemPrompt() doesn't mention both resolved tool names %q/%q:\n%s", nameA, nameB, prompt)
 	}
 }

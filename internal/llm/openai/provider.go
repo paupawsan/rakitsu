@@ -169,7 +169,7 @@ func (p *Provider) generate(
 	// Call the API
 	resp, err := p.client.CreateChatCompletion(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("openai API error: %w", err)
+		return nil, wrapAPIError("openai API error", err)
 	}
 
 	// Parse the response
@@ -318,7 +318,7 @@ func (p *Provider) GenerateStream(
 
 	stream, err := p.client.CreateChatCompletionStream(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("openai stream error: %w", err)
+		return nil, wrapAPIError("openai stream error", err)
 	}
 
 	chunksCh := make(chan llm.StreamChunk, 64)

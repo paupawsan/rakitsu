@@ -125,7 +125,7 @@ func (p *Provider) generate(
 
 	resp, err := p.client.Messages.New(ctx, params)
 	if err != nil {
-		return nil, fmt.Errorf("anthropic API error: %w", err)
+		return nil, wrapAPIError("anthropic API error", err)
 	}
 
 	return p.parseResponse(resp)
