@@ -528,6 +528,78 @@ func TestCheckpoint_Stress100Steps(t *testing.T) {
 	}
 }
 
+// TestWriteIndex_WriteIsAtomicNoTmpLeak mirrors TestCheckpoint_WriteIsAtomicNoTmpLeak
+// above for sessions.json's own writer.
+func TestWriteIndex_WriteIsAtomicNoTmpLeak(t *testing.T) {
+	s := newTestStore(t)
+	startTestSession(t, s)
+	s.EndSession(SessionSuccess)
+
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Fatalf("stray tmp file after StartSession/EndSession: %s", e.Name())
+		}
+	}
+}
+
+// TestGetSessionListSessions_ConcurrentWithWrites_NoCorruptIndexRead stresses
+// GetSession/ListSessions against concurrent StartSession/EndSession writes
+// to the same sessions.json. Before this fix, GetSession/ListSessions called
+// readIndex() outside s.mu and writeIndex wrote via a plain, non-atomic
+// os.WriteFile — a read landing mid-write could observe a truncated file and
+// fail with "corrupt sessions index". Neither is guaranteed to reproduce on
+// every run (this is real filesystem timing, not a Go memory race the
+// detector can flag), but this is the same class of stress proof already
+// established by TestDeleteSession_ConcurrentWithStartSessionIndexRace above
+// for the write/write side of this exact file.
+func TestGetSessionListSessions_ConcurrentWithWrites_NoCorruptIndexRead(t *testing.T) {
+	s := newTestStore(t)
+
+	const n = 30
+	ids := make([]string, n)
+	for i := range ids {
+		if err := s.StartSession(SessionMeta{Name: fmt.Sprintf("pre-%d", i), Query: "q"}); err != nil {
+			t.Fatalf("StartSession: %v", err)
+		}
+		ids[i] = s.CurrentSessionID()
+		s.EndSession(SessionSuccess)
+	}
+
+	var wg sync.WaitGroup
+	var startMu sync.Mutex // serializes StartSession/EndSession pairs against each other only
+
+	for i := 0; i < n; i++ {
+		wg.Add(3)
+		go func(id string) {
+			defer wg.Done()
+			if _, err := s.ListSessions(); err != nil {
+				t.Errorf("ListSessions: %v", err)
+			}
+		}(ids[i])
+		go func(id string) {
+			defer wg.Done()
+			if _, err := s.GetSession(id); err != nil && strings.Contains(err.Error(), "corrupt sessions index") {
+				t.Errorf("GetSession(%s): %v", id, err)
+			}
+		}(ids[i])
+		go func(i int) {
+			defer wg.Done()
+			startMu.Lock()
+			defer startMu.Unlock()
+			if err := s.StartSession(SessionMeta{Name: fmt.Sprintf("post-%d", i), Query: "q"}); err != nil {
+				t.Errorf("StartSession: %v", err)
+				return
+			}
+			s.EndSession(SessionSuccess)
+		}(i)
+	}
+	wg.Wait()
+}
+
 func copyResults(m map[string]StoreStepResult) map[string]StoreStepResult {
 	out := make(map[string]StoreStepResult, len(m))
 	for k, v := range m {

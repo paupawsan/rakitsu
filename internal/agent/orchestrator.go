@@ -26,11 +26,10 @@ type Orchestrator struct {
 	handoffConfig  *config.HandoffConfig
 	pipelineConfig *config.PipelineConfig
 
-	llmProvider  llm.LLMProvider
-	eventBus     *telemetry.EventBus
-	agents       map[string]Runner
-	toolRegistry *tools.ToolRegistry
-	debugCtrl    *debug.DebugController
+	llmProvider llm.LLMProvider
+	eventBus    *telemetry.EventBus
+	agents      map[string]Runner
+	debugCtrl   *debug.DebugController
 	// steering, when non-nil, is forwarded to the synthetic supervisor Agent
 	// built per Run — the orchestrator itself has no ReAct loop, only the
 	// supervisor does.
@@ -226,7 +225,6 @@ func NewOrchestrator(
 		llmProvider:    llmProvider,
 		eventBus:       eventBus,
 		agents:         agents,
-		toolRegistry:   tools.NewToolRegistry(),
 	}
 }
 
@@ -272,8 +270,15 @@ func (o *Orchestrator) runReAct(ctx context.Context, query string) (string, erro
 	// counts. See orchestratorRunState's doc comment.
 	state := &orchestratorRunState{}
 
-	// Register delegation tools for each worker agent
-	o.registerDelegationTools(state)
+	// Delegation tools are registered into a fresh registry per call too,
+	// not just a fresh state: a shared, Orchestrator-lifetime registry would
+	// let a second concurrent Run's registerDelegationTools overwrite the
+	// first Run's delegate_to_X tool object (RegisterTool replaces same-name
+	// entries), so the first Run's supervisor would end up executing the
+	// second Run's tool — recording outcomes into the wrong run's state even
+	// though the state objects themselves are correctly isolated.
+	registry := tools.NewToolRegistry()
+	o.registerDelegationTools(registry, state)
 
 	// Create a supervisor agent that uses delegation tools
 	supervisor := &Agent{
@@ -283,7 +288,7 @@ func (o *Orchestrator) runReAct(ctx context.Context, query string) (string, erro
 		systemPrompt:  o.buildSystemPrompt(),
 		tools:         o.getDelegationToolNames(),
 		llmProvider:   o.llmProvider,
-		toolRegistry:  o.toolRegistry,
+		toolRegistry:  registry,
 		eventBus:      o.eventBus,
 		maxIterations: 15, // Higher limit for orchestrator
 		contextMon:    NewContextMonitor(config.ContextConfig{}),
@@ -321,8 +326,11 @@ func (o *Orchestrator) runReAct(ctx context.Context, query string) (string, erro
 }
 
 // registerDelegationTools creates virtual tools for delegating to worker
-// agents, wiring each one to the given run-scoped state.
-func (o *Orchestrator) registerDelegationTools(state *orchestratorRunState) {
+// agents, wiring each one to the given run-scoped state and registering it
+// into the given run-scoped registry. Both must be fresh per runReAct()
+// call — a registry shared across concurrent Runs would let one Run's
+// registration overwrite another's tool object under the same name.
+func (o *Orchestrator) registerDelegationTools(registry *tools.ToolRegistry, state *orchestratorRunState) {
 	for _, agentName := range o.agentNames {
 		agent, exists := o.agents[agentName]
 		if !exists {
@@ -339,7 +347,7 @@ func (o *Orchestrator) registerDelegationTools(state *orchestratorRunState) {
 			runState:   state,
 		}
 
-		o.toolRegistry.RegisterTool(tool)
+		registry.RegisterTool(tool)
 	}
 }
 

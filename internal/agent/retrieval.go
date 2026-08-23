@@ -254,7 +254,18 @@ func (r *EmbeddingRetriever) Query(query string, topK int) []RetrievedSegment {
 	r.mu.RLock()
 	docs := r.docs
 	hasFailed := len(r.failedIDs) > 0
-	failedIDs := r.failedIDs
+	// Snapshot into a fresh map rather than copying the map reference:
+	// r.failedIDs is a live map that Index() mutates under r.mu.Lock(), so
+	// reading failedIDs[id] below after releasing RLock would be an
+	// unsynchronized read against that same map — the identical hazard
+	// BM25Retriever.Query holds its lock for its full duration to avoid.
+	var failedIDs map[string]struct{}
+	if hasFailed {
+		failedIDs = make(map[string]struct{}, len(r.failedIDs))
+		for id := range r.failedIDs {
+			failedIDs[id] = struct{}{}
+		}
+	}
 	r.mu.RUnlock()
 
 	if len(docs) == 0 {

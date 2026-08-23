@@ -10,7 +10,6 @@ import (
 
 	"github.com/paupawsan/rakitsu/internal/config"
 	"github.com/paupawsan/rakitsu/internal/telemetry"
-	"github.com/paupawsan/rakitsu/internal/tools"
 )
 
 // ============================================================
@@ -439,9 +438,8 @@ func TestDelegationTool_WithSubOrchestrator(t *testing.T) {
 				{Name: "work", Agent: "Worker", Task: "do it"},
 			},
 		},
-		agents:       map[string]Runner{"Worker": worker},
-		eventBus:     bus,
-		toolRegistry: tools.NewToolRegistry(),
+		agents:   map[string]Runner{"Worker": worker},
+		eventBus: bus,
 	}
 
 	// Create a delegation tool targeting the sub-orchestrator

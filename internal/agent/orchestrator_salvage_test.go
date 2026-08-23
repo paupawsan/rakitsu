@@ -459,10 +459,19 @@ func TestOrchestrator_LastRunUnproductivePreferredOverSalvaged(t *testing.T) {
 // delegation paths). Two concurrent runReAct() calls sharing that state
 // would corrupt each other: one Run's unproductive-worker tracking would
 // silently arm the block gate for the other Run, and vice versa.
-// registerDelegationTools() now takes the calling Run's orchestratorRunState
-// explicitly, so this wires two different states against the same
-// Orchestrator, drives both concurrently, and asserts neither run's
-// tracking leaks into the other's.
+//
+// A second gap surfaced later (rung 05's follow-up review): registering both
+// runs' delegation tools into one shared, Orchestrator-lifetime registry has
+// the same failure mode one level up — RegisterTool overwrites same-name
+// entries, so Run B's registration replaces Run A's delegate_to_W tool
+// object, and Run A's supervisor ends up executing Run B's tool (looked up
+// by name at call time) even though the state objects themselves were
+// correctly isolated. registerDelegationTools() now takes both the run's
+// registry and its state explicitly, so this wires two independent
+// registry+state pairs against the same Orchestrator — matching exactly
+// what runReAct() allocates per call — drives both concurrently, and
+// asserts neither run's tracking nor its tool registration leaks into the
+// other's.
 func TestOrchestrator_RegisterDelegationTools_IsolatesConcurrentRunState(t *testing.T) {
 	bus := telemetry.NewEventBus(64)
 	worker := &salvageFakeAgent{
@@ -475,34 +484,39 @@ func TestOrchestrator_RegisterDelegationTools_IsolatesConcurrentRunState(t *test
 		unproductiveSchedule: []bool{true, true, true, true, true, true},
 	}
 	orch := &Orchestrator{
-		name:         "Sup",
-		agentNames:   []string{"W"},
-		agents:       map[string]Runner{"W": worker},
-		eventBus:     bus,
-		toolRegistry: tools.NewToolRegistry(),
+		name:       "Sup",
+		agentNames: []string{"W"},
+		agents:     map[string]Runner{"W": worker},
+		eventBus:   bus,
 	}
 
-	// Two independent run-scoped states, as runReAct() would allocate fresh
-	// for two concurrent Run() calls.
+	// Two independent registry+state pairs, as runReAct() would allocate
+	// fresh for two concurrent Run() calls.
+	registryA := tools.NewToolRegistry()
+	registryB := tools.NewToolRegistry()
 	stateA := &orchestratorRunState{}
 	stateB := &orchestratorRunState{}
 
-	orch.registerDelegationTools(stateA)
-	toolAIface := orch.toolRegistry.GetTool("delegate_to_w")
+	orch.registerDelegationTools(registryA, stateA)
+	orch.registerDelegationTools(registryB, stateB)
+
+	toolAIface := registryA.GetTool("delegate_to_w")
 	toolA, ok := toolAIface.(*DelegationTool)
 	if !ok {
 		t.Fatalf("GetTool returned %T, want *DelegationTool", toolAIface)
 	}
 	if toolA.runState != stateA {
-		t.Fatalf("tool registered via registerDelegationTools(stateA) has a different runState — not wired to the state passed in")
+		t.Fatalf("tool registered via registerDelegationTools(registryA, stateA) has a different runState — not wired to the state passed in")
 	}
 
-	// dtB is built directly with stateB rather than a second
-	// registerDelegationTools() call, since the shared toolRegistry would
-	// otherwise just overwrite toolA's entry under the same tool name — the
-	// isolation property under test is orchestratorRunState's, not the
-	// (separately shared, by design) toolRegistry's.
-	dtB := &DelegationTool{agent: worker, eventBus: bus, fromAgent: orch.name, runState: stateB}
+	toolBIface := registryB.GetTool("delegate_to_w")
+	toolB, ok := toolBIface.(*DelegationTool)
+	if !ok {
+		t.Fatalf("GetTool returned %T, want *DelegationTool", toolBIface)
+	}
+	if toolB.runState != stateB {
+		t.Fatalf("tool registered via registerDelegationTools(registryB, stateB) has a different runState — not wired to the state passed in")
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -513,7 +527,7 @@ func TestOrchestrator_RegisterDelegationTools_IsolatesConcurrentRunState(t *test
 	}()
 	go func() {
 		defer wg.Done()
-		_, _ = dtB.Execute(context.Background(), map[string]interface{}{"task": "b1"})
+		_, _ = toolB.Execute(context.Background(), map[string]interface{}{"task": "b1"})
 	}()
 	wg.Wait()
 
@@ -522,5 +536,17 @@ func TestOrchestrator_RegisterDelegationTools_IsolatesConcurrentRunState(t *test
 	}
 	if stateB.isRedelegationBlocked("W") {
 		t.Error("Run B: made only one delegation under state B and must not be blocked — a leak from Run A's tracking would fail this")
+	}
+
+	// The regression this fix closes: even after both runs have registered,
+	// each registry must still resolve delegate_to_w to its own run's tool
+	// object — proving the registries themselves, not just the state, are
+	// isolated. Before the fix there was only one shared registry, so this
+	// property couldn't even be expressed.
+	if got := registryA.GetTool("delegate_to_w").(*DelegationTool); got.runState != stateA {
+		t.Error("registryA's delegate_to_w resolves to the wrong run's state — registries are not isolated")
+	}
+	if got := registryB.GetTool("delegate_to_w").(*DelegationTool); got.runState != stateB {
+		t.Error("registryB's delegate_to_w resolves to the wrong run's state — registries are not isolated")
 	}
 }

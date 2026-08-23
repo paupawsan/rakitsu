@@ -77,6 +77,37 @@ func TestEmbeddingRetriever_RecoversFailedEmbedViaBM25(t *testing.T) {
 	}
 }
 
+// TestEmbeddingRetriever_ConcurrentIndexQuery regression-guards against an
+// unsynchronized concurrent map read/write on failedIDs between Index
+// (which mutates it under a write lock on every failed or later-recovered
+// embed) and Query's BM25-fallback-recovery block, which used to copy the
+// map reference under a read lock and then read failedIDs[id] after
+// releasing it. Run with -race to be meaningful.
+func TestEmbeddingRetriever_ConcurrentIndexQuery(t *testing.T) {
+	cfg := config.RetrievalConfig{Enabled: true, TopK: 5, ErrorBias: 1.0}
+	provider := &flakyProvider{failMarker: "FAIL"}
+	retriever := NewRetriever(cfg, provider)
+
+	// One doc must embed successfully first so len(docs) > 0 and Query's
+	// fallback-recovery block — the one that reads failedIDs — actually
+	// runs on every subsequent Query call below.
+	retriever.Index("seed", "write_file succeeded", SegmentMeta{Iteration: 0, Type: "step"})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			retriever.Index(fmt.Sprintf("doc-%d", i), "FAIL concurrent_marker", SegmentMeta{Iteration: i, Type: "step"})
+		}(i)
+		go func() {
+			defer wg.Done()
+			retriever.Query("concurrent_marker", 5)
+		}()
+	}
+	wg.Wait()
+}
+
 // deadlineCapturingProvider records whether the context passed to Embed had
 // a deadline set, to verify EmbeddingRetriever bounds the call instead of
 // using context.Background() (which never times out).
