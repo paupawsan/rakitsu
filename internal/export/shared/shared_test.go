@@ -160,7 +160,7 @@ settings:
 	cfg := &config.Config{
 		Settings: config.Settings{
 			Providers: map[string]config.ProviderDefinition{
-				"dgx": {Type: "ollama", APIKey: "sk-real-resolved-secret", BaseURL: "http://10.0.0.5:1234"},
+				"dgx": {Type: "ollama", APIKey: "sk-real-resolved-secret", BaseURL: "http://10.0.0.1:1234"},
 			},
 		},
 	}
