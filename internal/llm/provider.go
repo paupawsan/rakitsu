@@ -9,9 +9,8 @@ import (
 )
 
 // ContentType identifies the kind of content carried by a ContentBlock.
-// See docs/internal/SPEC-multimodal.md — M1.5 phase 0 introduces these types
-// but only ever constructs ContentTypeText blocks; the other four arrive in
-// later phases.
+// The current phase introduces these types but only ever constructs
+// ContentTypeText blocks; the other four arrive in later phases.
 type ContentType string
 
 const (
@@ -113,7 +112,6 @@ type ToolCall struct {
 // NormalizeArgKeys trims leading/trailing whitespace from argument map keys.
 // Some models (notably Gemini) occasionally emit keys like `" args"` with
 // stray whitespace, causing parameter lookup failures downstream.
-// Regression: B23 in STABILITY-gate.md.
 func NormalizeArgKeys(args map[string]interface{}) map[string]interface{} {
 	if args == nil {
 		return nil
