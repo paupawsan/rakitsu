@@ -20,7 +20,7 @@
 //   - Model-name pattern registry
 //
 // Future phases will migrate the existing <think>/<tool_call> workarounds from
-// internal/llm/openai/provider.go into this system. See docs/internal/PLAN-response-format-adapters.md.
+// internal/llm/openai/provider.go into this system.
 package format
 
 import (
@@ -113,7 +113,8 @@ type FormatState struct {
 	// (delta.reasoning_content and inline <think>) onto one telemetry path.
 	//
 	// Nil-safe: adapters must check before calling. When nil, adapters still
-	// accumulate reasoning into state.Reasoning silently (pre-B54 behavior).
+	// accumulate reasoning into state.Reasoning silently (the original behavior,
+	// before this peer-emit hook existed).
 	OnReasoningDelta func(reasoning string)
 
 	// thinkInline holds per-request state for ThinkTagInline's streaming
