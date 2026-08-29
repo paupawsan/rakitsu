@@ -1,0 +1,7 @@
+name: test-agent
+version: "1.0"
+agents:
+  - name: assistant
+    provider: openai
+    model: gpt-4o-mini
+    system_prompt: "You are a test assistant."
