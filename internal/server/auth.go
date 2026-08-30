@@ -71,16 +71,30 @@ func (e *bindRefusedError) Error() string {
 // open so the page can load.
 //
 // Wiring a new handler onto the mux? It needs adding here too — this is an
-// allowlist, not a default-deny, so a forgotten endpoint fails open. MCPServer
-// (mcp.go) is the current example: unmounted today so it's not reachable, but
-// it executes arbitrary registered tools and has no auth check of its own —
-// whichever path it eventually gets mounted on must be added here first.
+// allowlist, not a default-deny, so a forgotten endpoint fails open.
 func requiresAuth(r *http.Request) bool {
 	p := r.URL.Path
 	switch p {
 	case "/api/run", "/api/run/stop",
 		"/api/browse", "/api/workdir",
-		"/api/configs/upload", "/api/configs/upload-zip", "/api/configs/inline":
+		"/api/configs/upload", "/api/configs/upload-zip", "/api/configs/inline",
+		// isAllowedProxyTarget (sse.go) blocks the obvious SSRF targets, but
+		// still allows loopback and private ranges by design (reaching
+		// local/Tailscale-networked LLM providers). That's fine when the
+		// server only binds loopback; once RequireBindAllowed permits a
+		// non-loopback bind, this outbound-request proxy becomes reachable
+		// by anyone on that network too, so it needs the same token gate as
+		// every other endpoint that can be pointed at internal targets.
+		"/api/providers/models", "/api/providers/model-info":
+		return true
+	}
+	// MCPServer (mcp.go) executes arbitrary registered tools and has no auth
+	// check of its own. Its standalone http.Server (--mcp-port) has nothing
+	// else mounted on it, so match by prefix rather than the documented "/mcp"
+	// convention alone — ServeHTTP itself doesn't restrict which path it
+	// answers on. A2A is the same shape: full tool-execution surface, no auth
+	// of its own.
+	if strings.HasPrefix(p, "/mcp") || p == "/a2a" {
 		return true
 	}
 	// Every debugger endpoint is sensitive: it inspects live agent state or

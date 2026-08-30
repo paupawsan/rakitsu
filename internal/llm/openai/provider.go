@@ -336,7 +336,7 @@ func (p *Provider) GenerateStream(
 		// whatever shape this model emits (standard OpenAI, reasoning_content
 		// field for Nemotron/DeepSeek, etc). See internal/llm/format/.
 		state := format.NewState()
-		// B54: peer-emit reasoning bytes extracted at stream time by ThinkTagInline
+		// Peer-emit reasoning bytes extracted at stream time by ThinkTagInline
 		// (inline <think>...</think> shape). The other shape (delta.reasoning_content
 		// field) is handled below; both converge on StreamChunk.Reasoning so
 		// downstream telemetry (EventReasoningChunk) sees one unified channel.
@@ -377,13 +377,12 @@ func (p *Provider) GenerateStream(
 				chunksCh <- llm.StreamChunk{Text: surface}
 			}
 
-			// Phase 6 / Claim 2 fix: surface reasoning_content as its own
-			// stream channel. The format adapter consumes it silently into
-			// state.Reasoning (so it doesn't pollute the answer surface);
-			// without this peer emit, the entire reasoning phase of a
-			// reasoning model is invisible to the agent loop, the tracer,
-			// the SSE hub, and every UI consumer. See
-			// docs/internal/POSITIONING-AUDIT.md Claim 1-2 (2026-05-12).
+			// Surface reasoning_content as its own stream channel. The format
+			// adapter consumes it silently into state.Reasoning (so it
+			// doesn't pollute the answer surface); without this peer emit,
+			// the entire reasoning phase of a reasoning model is invisible
+			// to the agent loop, the tracer, the SSE hub, and every UI
+			// consumer.
 			if rawDelta.ReasoningContent != "" {
 				chunksCh <- llm.StreamChunk{Reasoning: rawDelta.ReasoningContent}
 			}

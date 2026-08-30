@@ -1046,8 +1046,20 @@ func (s *SSEServer) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// providerAPIKeyFromRequest reads the provider API key to use for an
+// outbound probe. Prefers the Authorization header (never logged or kept in
+// browser history) and falls back to the legacy ?api_key= query param for
+// backward compatibility.
+func providerAPIKeyFromRequest(r *http.Request) string {
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		return strings.TrimPrefix(auth, "Bearer ")
+	}
+	return r.URL.Query().Get("api_key")
+}
+
 // handleProviderModels proxies GET /v1/models to an OpenAI-compatible endpoint.
-// Query params: base_url (required), api_key (optional).
+// Query params: base_url (required). API key: Authorization: Bearer header
+// (preferred) or the legacy ?api_key= query param.
 func (s *SSEServer) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != http.MethodGet {
@@ -1056,7 +1068,7 @@ func (s *SSEServer) handleProviderModels(w http.ResponseWriter, r *http.Request)
 	}
 
 	baseURL := strings.TrimRight(r.URL.Query().Get("base_url"), "/")
-	apiKey := r.URL.Query().Get("api_key")
+	apiKey := providerAPIKeyFromRequest(r)
 	if baseURL == "" {
 		json.NewEncoder(w).Encode(map[string]interface{}{"models": []string{}})
 		return
@@ -1138,7 +1150,7 @@ func (s *SSEServer) handleProviderModelInfo(w http.ResponseWriter, r *http.Reque
 	}
 
 	baseURL := strings.TrimRight(r.URL.Query().Get("base_url"), "/")
-	apiKey := r.URL.Query().Get("api_key")
+	apiKey := providerAPIKeyFromRequest(r)
 	if baseURL == "" {
 		json.NewEncoder(w).Encode(map[string]interface{}{"models": []interface{}{}})
 		return
@@ -1512,27 +1524,45 @@ func isAllowedProxyTarget(rawURL string) bool {
 	}
 	host := u.Hostname()
 
-	// Block cloud metadata endpoints
+	// Block cloud metadata endpoints by name too — cheap insurance alongside
+	// the IP-based check below.
 	if host == "169.254.169.254" || host == "metadata.google.internal" {
 		return false
 	}
 
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return true // hostname, allow (DNS resolution happens at request time)
+	if ip := net.ParseIP(host); ip != nil {
+		return isAllowedProxyIP(ip)
 	}
 
+	// Hostname, not a literal IP: resolve it and check every address it
+	// comes back with. The outbound request this gates uses the same
+	// resolution, so a hostname whose DNS points at a blocked range (e.g.
+	// attacker-controlled DNS pointed at the cloud metadata IP) must be
+	// rejected the same as if the URL had used that IP directly — skipping
+	// this check for hostnames would make it bypassable by name alone.
+	addrs, err := net.LookupHost(host)
+	if err != nil || len(addrs) == 0 {
+		return false
+	}
+	for _, a := range addrs {
+		ip := net.ParseIP(a)
+		if ip == nil || !isAllowedProxyIP(ip) {
+			return false
+		}
+	}
+	return true
+}
+
+// isAllowedProxyIP applies the IP-range policy shared by both the literal-IP
+// and resolved-hostname paths in isAllowedProxyTarget.
+func isAllowedProxyIP(ip net.IP) bool {
 	// Block link-local (169.254.x.x) and unspecified (0.0.0.0)
 	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
 		return false
 	}
-
-	// Allow loopback (127.x.x.x, ::1) for local services
-	if ip.IsLoopback() {
-		return true
-	}
-
-	// Allow private ranges (10.x, 172.16-31.x, 192.168.x) for local/Tailscale networks
+	// Loopback (127.x.x.x, ::1) and private ranges (10.x, 172.16-31.x,
+	// 192.168.x) are allowed — this proxy exists specifically to reach
+	// local/Tailscale-networked LLM providers.
 	return true
 }
 
