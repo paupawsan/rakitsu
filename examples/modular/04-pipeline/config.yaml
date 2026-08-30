@@ -1,0 +1,68 @@
+# 04 — Pipeline with Parallel Steps and Synthesis (modular)
+#
+# Agents and tools are auto-discovered from subdirectories.
+# Only settings and orchestrator (with pipeline steps) are defined here.
+#
+# Usage:
+#   rakitsu run examples/modular/04-pipeline/config.yaml "Write a technical blog post about WebAssembly"
+
+name: Content Publishing Pipeline
+version: "1.0"
+description: Multi-stage content pipeline with parallel translation and synthesis.
+
+settings:
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+  defaults:
+    model: gpt-4o-mini
+    temperature: 0.5
+    max_tokens: 4096
+  execution:
+    timeout_seconds: 300
+
+orchestrator:
+  name: Publisher
+  strategy: Pipeline
+  provider: openai
+  model: gpt-4o-mini
+  agents:
+    - Researcher
+    - Drafter
+    - Editor
+    - TranslatorES
+    - TranslatorJP
+    - TranslatorFR
+  pipeline:
+    synthesis: true
+    synthesis_prompt: |
+      Compile the edited blog post and all translations into a final publishing package.
+      List the original (English) and each translation with a brief summary.
+    steps:
+      - name: research
+        agent: Researcher
+        task: Research the topic and produce a structured brief.
+        timeout_sec: 60
+
+      - name: draft
+        agent: Drafter
+        task: Write the blog post based on the research.
+
+      - name: edit
+        agent: Editor
+        task: Edit and polish the draft.
+
+      - name: translate
+        type: parallel
+        steps:
+          - name: spanish
+            agent: TranslatorES
+            task: Translate the edited post to Spanish.
+          - name: japanese
+            agent: TranslatorJP
+            task: Translate the edited post to Japanese.
+          - name: french
+            agent: TranslatorFR
+            task: Translate the edited post to French.

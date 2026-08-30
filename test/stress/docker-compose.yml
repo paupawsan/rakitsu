@@ -1,0 +1,63 @@
+version: "3.8"
+
+services:
+  mockllm:
+    build:
+      context: ../..
+      dockerfile: test/stress/Dockerfile.mockllm
+    ports:
+      - "8999:8999"
+    environment:
+      MOCK_LATENCY_MS: "50"
+      MOCK_FAILURE_RATE: "0.05"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8999/health"]
+      interval: 2s
+      timeout: 5s
+      retries: 5
+
+  hub:
+    build:
+      context: ../..
+    command: ["serve", "--port", "9100", "--host", "0.0.0.0"]
+    ports:
+      - "9100:9100"
+    depends_on:
+      mockllm:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9100/health"]
+      interval: 2s
+      timeout: 5s
+      retries: 5
+
+  runner:
+    build:
+      context: ../..
+      dockerfile: test/stress/Dockerfile.runner
+    depends_on:
+      hub:
+        condition: service_healthy
+      mockllm:
+        condition: service_healthy
+    environment:
+      HUB_URL: "http://hub:9100"
+      MOCK_LLM_URL: "http://mockllm:8999/v1"
+    volumes:
+      - ./results:/results
+
+  agent-worker:
+    build:
+      context: ../..
+    depends_on:
+      hub:
+        condition: service_healthy
+      mockllm:
+        condition: service_healthy
+    deploy:
+      replicas: 10
+    command: >
+      run --hub http://hub:9100 --trace
+      /configs/single-agent.yaml "stress test query"
+    environment:
+      MOCK_LLM_URL: "http://mockllm:8999/v1"

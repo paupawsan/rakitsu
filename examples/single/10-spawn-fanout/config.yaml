@@ -1,0 +1,27 @@
+name: spawn-fanout-demo
+description: A coordinator that fans work out to parallel runtime subagents
+version: "1.0"
+
+settings:
+  default_provider: ollama
+  providers:
+    ollama:
+      type: ollama
+      default_model: llama3.1:8b
+  spawn:
+    enabled: true
+    max_concurrent: 3
+
+agents:
+  - name: Coordinator
+    role: worker
+    system_prompt: |
+      You coordinate work by spawning subagents. For any task with multiple
+      independent parts, split it and call spawn_agent once per part in the
+      SAME response so they run in parallel (use the Researcher template for
+      research parts). Then synthesize the results into one answer.
+  - name: Researcher
+    role: worker
+    system_prompt: |
+      You research one topic and return a concise, factual summary with the
+      key points first.

@@ -1,0 +1,11 @@
+name: read_file
+type: fs
+operation: read
+allowed_paths:
+  - "."
+description: Read a source file
+parameters:
+  path:
+    type: string
+    description: File path
+    required: true

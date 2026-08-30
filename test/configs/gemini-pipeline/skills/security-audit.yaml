@@ -1,0 +1,13 @@
+name: "security_audit"
+description: "Security vulnerability assessment"
+tools:
+  - "read_file"
+  - "search_files"
+prompt_template: |
+  Perform a security audit. Check for:
+  1. Injection vulnerabilities (SQL, command, path traversal)
+  2. Input validation gaps
+  3. Authentication/authorization issues
+  4. Data exposure risks
+  5. Insecure defaults or configurations
+  Rate each finding by OWASP category and severity.

@@ -1,0 +1,270 @@
+# 08 — Full Featured (Kitchen Sink)
+#
+# Demonstrates EVERY configuration feature in one config:
+#   - Named providers with fallback chains
+#   - Reflection (all modes: after_tool, before_answer, both, on_error, every_n)
+#   - Ground check with confidence threshold and custom prompt
+#   - Budget enforcement (global + per-agent token/cost limits)
+#   - Context management (auto strategy with retrieval)
+#   - Vision agent
+#   - Skills with tool bundles
+#   - Inline tools (tools_inline)
+#   - Docker sandbox
+#   - Pipeline with synthesis
+#   - Model pricing
+#   - model_config overrides
+#
+# Usage:
+#   rakitsu run examples/single/08-full-featured/config.yaml "Analyze the uploaded architecture diagram and generate a technical report"
+
+name: Enterprise Analysis Platform
+version: "1.0"
+description: |
+  Full-featured analysis platform demonstrating every config capability.
+  Uses provider fallback, reflection, ground-check, budgets, context management,
+  vision, skills, inline tools, and docker sandbox.
+
+settings:
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+      default_model: gpt-4o-mini
+    anthropic:
+      type: anthropic
+      api_key: ${ANTHROPIC_API_KEY}
+    ollama-embed:
+      type: ollama
+      base_url: http://localhost:11434/v1
+
+  defaults:
+    model: gpt-4o-mini
+    temperature: 0.3
+    max_tokens: 4096
+
+  execution:
+    max_iterations: 15
+    timeout_seconds: 600
+    max_total_tokens: 500000       # Global hard token budget
+    max_cost: 2.00                 # Global hard cost budget (USD)
+
+  pricing:
+    gpt-4o:
+      input: 2.50                  # USD per 1M input tokens
+      output: 10.00
+    gpt-4o-mini:
+      input: 0.15
+      output: 0.60
+    claude-sonnet-4-6:
+      input: 3.00
+      output: 15.00
+
+  allowed_commands:
+    - find
+    - grep
+    - cat
+    - ls
+    - wc
+    - head
+
+tools:
+  - name: read_file
+    type: fs
+    operation: read
+    allowed_paths:
+      - "."
+    description: Read a document or source file
+    parameters:
+      path: { type: string, description: "File path", required: true }
+
+  - name: write_file
+    type: fs
+    operation: write
+    allowed_paths:
+      - "."
+    description: Write analysis output to a file
+    parameters:
+      path: { type: string, description: "File path", required: true }
+      content: { type: string, description: "File content", required: true }
+
+  - name: search_files
+    type: fs
+    operation: search
+    allowed_paths:
+      - "."
+    description: Search for patterns across files
+    parameters:
+      pattern: { type: string, description: "Search pattern (regex)", required: true }
+      path: { type: string, description: "Directory to search", required: true }
+
+  - name: list_files
+    type: fs
+    operation: list
+    allowed_paths:
+      - "."
+    description: List files in a directory
+    parameters:
+      path: { type: string, description: "Directory path", required: true }
+
+  - name: lint_yaml
+    type: cli
+    description: Lint YAML files for syntax errors
+    command: "sh -c 'yamllint \"{{path}}\"'"
+    parameters:
+      path: { type: string, description: "YAML file to lint", required: true }
+    sandbox:
+      type: docker
+      image: cytopia/yamllint
+      mount_workdir: true
+      network_isolated: true
+      resource_limits:
+        cpu_limit: "500m"
+        memory_limit: "256Mi"
+        timeout_sec: 10
+
+skills:
+  - name: deep_analysis
+    description: Thorough multi-step analysis workflow
+    tools: [read_file, search_files, list_files]
+    prompt_template: |
+      Perform a deep analysis:
+      1. Scan all relevant files
+      2. Identify patterns and anomalies
+      3. Cross-reference findings
+      4. Produce a structured report with evidence
+
+agents:
+  # --- Researcher: fallback chain + auto context + retrieval ---
+  - name: Researcher
+    role: worker
+    providers:                           # Ordered fallback chain
+      - name: openai
+        model: gpt-4o
+      - name: anthropic
+        model: claude-sonnet-4-6
+    system_prompt: |
+      You are a thorough researcher. Investigate the topic using all available tools.
+      Cite specific evidence for every claim.
+    tools: [read_file, search_files, list_files]
+    skills: [deep_analysis]
+    settings:
+      max_iterations: 10
+      max_cost: 0.50                     # Per-agent cost budget
+      reflection:
+        enabled: true
+        mode: both                       # Reflect after tools AND before answer
+        frequency: every_n
+        every_n: 3                       # Reflect every 3 iterations
+      context:
+        strategy: auto                   # Escalates: full → sliding_window → step_log
+        auto_full_threshold: 20
+        auto_compress_threshold: 40
+        context_budget_threshold: 0.75
+        max_tool_output: 8000
+        fence_outputs: true
+        retrieval:
+          enabled: true
+          top_k: 5
+          embedding_provider: ollama
+          embedding_model: nomic-embed-text
+          embedding_url: http://localhost:11434
+
+  # --- Vision Analyst: image understanding ---
+  - name: VisionAnalyst
+    role: worker
+    vision: true                         # Accept image inputs
+    model_config:
+      temperature: 0.2
+    system_prompt: |
+      You analyze visual content: architecture diagrams, screenshots, charts.
+      Describe what you see, identify components, and extract structured data.
+    tools: [read_file, list_files]
+    settings:
+      max_iterations: 3
+      reflection:
+        enabled: true
+        mode: after_tool
+        frequency: on_error              # Only reflect when a tool errors
+
+  # --- Writer: ground check + custom prompt ---
+  - name: Writer
+    role: worker
+    system_prompt: |
+      Write clear, accurate technical reports based on research findings.
+      Every claim must be supported by evidence from the research.
+    tools: [write_file]
+    settings:
+      max_iterations: 3
+      reflection:
+        enabled: true
+        mode: before_answer
+        frequency: always
+        prompt: |
+          Before finalizing, check:
+          1. Are all claims supported by the research?
+          2. Is the structure clear and logical?
+          3. Are there any gaps in the analysis?
+      ground_check:
+        enabled: true
+        confidence_threshold: 0.8
+        max_retries: 2
+        prompt: |
+          Verify this report:
+          - Are all factual claims supported by the provided research?
+          - Is the analysis logically sound?
+          - Are conclusions properly supported?
+          Rate confidence 0.0-1.0. Flag any unsupported claims.
+      context:
+        strategy: sliding_window
+        window_size: 20
+
+  # --- QA Checker: inline tools + token budget ---
+  - name: QAChecker
+    role: worker
+    system_prompt: |
+      Validate the final output for completeness, accuracy, and format.
+      Run automated checks and report any issues.
+    tools_inline:
+      - name: word_count
+        type: cli
+        description: Count words in a file
+        command: "sh -c 'wc -w \"{{path}}\"'"
+        parameters:
+          path: { type: string, description: "File to count", required: true }
+    tools: [read_file]
+    settings:
+      max_total_tokens: 50000            # Per-agent token budget
+      max_iterations: 2
+
+orchestrator:
+  name: AnalysisPipeline
+  strategy: Pipeline
+  provider: openai
+  model: gpt-4o-mini
+  model_config:
+    temperature: 0.1
+  agents:
+    - Researcher
+    - VisionAnalyst
+    - Writer
+    - QAChecker
+  pipeline:
+    synthesis: true
+    synthesis_prompt: |
+      Compile the research findings, visual analysis, written report, and QA results
+      into a final comprehensive deliverable. Highlight key insights and any open issues.
+    steps:
+      - name: research
+        agent: Researcher
+        task: Research the topic thoroughly using all available tools.
+        timeout_sec: 120
+      - name: visual_analysis
+        agent: VisionAnalyst
+        task: Analyze any visual materials (diagrams, screenshots, charts).
+      - name: write
+        agent: Writer
+        task: Write the technical report based on all research and analysis.
+      - name: qa
+        agent: QAChecker
+        task: Validate the report for completeness, accuracy, and format.

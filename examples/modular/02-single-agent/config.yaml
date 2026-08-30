@@ -1,0 +1,32 @@
+# 02 — Single Agent with Tools (modular)
+#
+# Agent and tools are auto-discovered from agents/ and tools/ subdirectories.
+#
+# Usage:
+#   rakitsu run examples/modular/02-single-agent/config.yaml "List all Go files and show their sizes"
+
+name: Code Explorer
+version: "1.0"
+description: Single agent with file system and shell tools for codebase exploration.
+
+settings:
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+  defaults:
+    model: gpt-4o-mini
+    temperature: 0.3
+    max_tokens: 4096
+  execution:
+    max_iterations: 8
+    timeout_seconds: 120
+  allowed_commands:
+    - find
+    - grep
+    - cat
+    - ls
+    - head
+    - wc
+    - tree

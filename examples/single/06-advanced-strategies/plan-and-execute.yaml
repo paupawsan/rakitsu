@@ -1,0 +1,81 @@
+# 06b — PlanAndExecute Strategy
+#
+# Two-phase approach: Planner creates a structured plan, Executor runs each step.
+# Falls through to ReAct internally — the supervisor delegates to Planner first,
+# then to Executor for each planned step.
+#
+# Usage:
+#   rakitsu run examples/single/06-advanced-strategies/plan-and-execute.yaml "Migrate the users table to add email verification"
+
+name: Database Migration
+version: "1.0"
+description: Plan-first approach for database migrations — analyze, plan, then execute.
+
+settings:
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+  defaults:
+    model: gpt-4o
+    temperature: 0.2
+    max_tokens: 8192
+  allowed_commands:
+    - psql
+    - pg_dump
+    - cat
+    - ls
+
+tools:
+  - name: read_file
+    type: fs
+    operation: read
+    allowed_paths:
+      - "."
+    description: Read migration files or schema definitions
+    parameters:
+      path: { type: string, description: "File path", required: true }
+
+  - name: run_sql
+    type: cli
+    description: Execute a SQL command via psql
+    command: "psql -c '{{sql}}'"
+    parameters:
+      sql: { type: string, description: "SQL statement to execute", required: true }
+    sandbox:
+      type: local_restricted
+      resource_limits:
+        timeout_sec: 15
+
+agents:
+  - name: Planner
+    role: worker
+    system_prompt: |
+      You are a database migration planner. Analyze the current schema,
+      understand the requirements, and create a step-by-step migration plan.
+      Include rollback steps for each migration.
+    tools: [read_file, run_sql]
+    settings: { max_iterations: 5 }
+
+  - name: Executor
+    role: worker
+    system_prompt: |
+      You execute database migration steps. Run each SQL migration carefully.
+      Verify each step before proceeding to the next.
+      If any step fails, report immediately — do not continue.
+    tools: [run_sql, read_file]
+    settings: { max_iterations: 8 }
+
+orchestrator:
+  name: MigrationLead
+  strategy: PlanAndExecute
+  provider: openai
+  model: gpt-4o
+  system_prompt: |
+    You coordinate a database migration. First, delegate to the Planner
+    to analyze and create a migration plan. Then delegate to the Executor
+    to run each step. Verify the final state matches expectations.
+  agents:
+    - Planner
+    - Executor

@@ -1,0 +1,18 @@
+name: run_sql
+type: cli
+description: Execute a SQL command via psql
+# SECURITY NOTE: {{sql}} runs as a single argv element passed directly to
+# `psql -c` (no shell involved — quoting here is just template syntax, not
+# a shell escape hazard), but the agent can still run ANY SQL, by design.
+# Rakitsu trusts its own config; don't treat this as isolation from a
+# malicious or compromised agent.
+command: "psql -c '{{sql}}'"
+parameters:
+  sql:
+    type: string
+    description: SQL statement to execute
+    required: true
+sandbox:
+  type: local_restricted
+  resource_limits:
+    timeout_sec: 15

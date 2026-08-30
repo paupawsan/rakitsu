@@ -1,0 +1,28 @@
+name: stress-large-output
+version: "1.0"
+description: Agent producing large outputs for stress testing
+
+settings:
+  default_provider: mock
+  defaults:
+    model: mock-model
+    temperature: 0.7
+    max_tokens: 128000
+  execution:
+    max_iterations: 5
+    timeout_seconds: 120
+
+tools:
+  - name: echo
+    type: cli
+    description: Echo tool
+    command: echo
+    allowed_args: ["*"]
+
+agents:
+  - name: large-worker
+    role: worker
+    provider: mock
+    model: mock-model
+    system_prompt: "You produce large outputs."
+    tools: [echo]

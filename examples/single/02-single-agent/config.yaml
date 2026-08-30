@@ -1,0 +1,104 @@
+# 02 — Single Agent with Tools
+#
+# One agent with CLI and filesystem tools. No orchestrator needed.
+# The agent autonomously decides which tools to use via the ReAct loop.
+#
+# Usage:
+#   rakitsu run examples/single/02-single-agent/config.yaml "List all Go files and show their sizes"
+#
+# Runs keyless against local Ollama by default (https://ollama.com):
+#   ollama pull llama3.1:8b
+# Prefer a cloud model? Uncomment a provider under settings.providers below.
+
+name: Code Explorer
+version: "1.0"
+description: Single agent with file system and shell tools for codebase exploration.
+
+settings:
+  default_provider: ollama
+  providers:
+    ollama:
+      type: ollama
+      base_url: http://localhost:11434/v1
+    # Alternatives — uncomment one and set default_provider + defaults.model above:
+    # openai:
+    #   type: openai
+    #   api_key: ${OPENAI_API_KEY}
+    # anthropic:
+    #   type: anthropic
+    #   api_key: ${ANTHROPIC_API_KEY}
+  defaults:
+    model: llama3.1:8b
+    temperature: 0.3
+    max_tokens: 4096
+  execution:
+    max_iterations: 8
+    timeout_seconds: 120
+  allowed_commands:
+    - sh  # required by run_command's sh -c wrapper
+    - find
+    - grep
+    - cat
+    - ls
+    - head
+    - wc
+    - tree
+
+tools:
+  - name: list_files
+    type: fs
+    operation: list
+    allowed_paths:
+      - "."
+    description: List files in a directory
+    parameters:
+      path: { type: string, description: "Directory path to list", required: true }
+
+  - name: read_file
+    type: fs
+    operation: read
+    allowed_paths:
+      - "."
+    description: Read file contents
+    parameters:
+      path: { type: string, description: "File path to read", required: true }
+
+  - name: search_files
+    type: fs
+    operation: search
+    allowed_paths:
+      - "."
+    description: Search for text patterns across files
+    parameters:
+      pattern: { type: string, description: "Search pattern (regex)", required: true }
+      path: { type: string, description: "Directory to search in", required: true }
+
+  - name: run_command
+    type: cli
+    description: Execute a shell command
+    # SECURITY NOTE: sh/bash are on rakitsu's system command whitelist, so
+    # this runs whatever shell syntax the agent produces — it's a footgun
+    # fence, not a sandbox boundary. Rakitsu trusts its own config; don't
+    # treat this as isolation from a malicious or compromised agent.
+    command: "sh -c '{{command}}'"
+    parameters:
+      command: { type: string, description: "Shell command to run", required: true }
+    sandbox:
+      type: local_restricted
+      resource_limits:
+        timeout_sec: 15
+
+agents:
+  - name: Explorer
+    role: worker
+    system_prompt: |
+      You are a code exploration assistant. Use your tools to navigate the filesystem,
+      read files, search for patterns, and run commands to answer questions about the codebase.
+      Always verify your findings by reading actual file contents before answering.
+    tools:
+      - list_files
+      - read_file
+      - search_files
+      - run_command
+    settings:
+      max_iterations: 8

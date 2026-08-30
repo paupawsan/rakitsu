@@ -1,0 +1,15 @@
+name: search_logs
+type: fs
+operation: search
+allowed_paths:
+  - "."
+description: Search for patterns in log files
+parameters:
+  pattern:
+    type: string
+    description: Search pattern (regex)
+    required: true
+  path:
+    type: string
+    description: Directory or file to search
+    required: true

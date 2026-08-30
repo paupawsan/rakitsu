@@ -1,0 +1,15 @@
+name: "write_file"
+type: "fs"
+description: "Write content to a file"
+operation: "write"
+allowed_paths:
+  - "./test/workspace/"
+parameters:
+  path:
+    type: "string"
+    description: "File path (e.g., './test/workspace/calculator.py')"
+    required: true
+  content:
+    type: "string"
+    description: "Content to write"
+    required: true

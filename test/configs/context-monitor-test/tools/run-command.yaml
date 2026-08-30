@@ -1,0 +1,19 @@
+name: "run_command"
+type: "cli"
+description: "Run a shell command for exploration. Allowed: ls, cat, head, tail, find, grep, wc, tree, diff, python3, go"
+# SECURITY NOTE: "Allowed" above describes intended use, not an enforced
+# sandbox — sh/bash are on rakitsu's system command whitelist, so this runs
+# whatever shell syntax the agent produces. Rakitsu trusts its own config;
+# don't treat this as isolation from a malicious or compromised agent.
+command: "sh -c {{command}}"
+parameters:
+  command:
+    type: "string"
+    description: "Shell command to execute (e.g., 'tree ./test/workspace/', 'grep -rn TODO ./test/workspace/')"
+    required: true
+sandbox:
+  type: "local_restricted"
+  allowed_paths:
+    - "."
+  resource_limits:
+    timeout_sec: 30

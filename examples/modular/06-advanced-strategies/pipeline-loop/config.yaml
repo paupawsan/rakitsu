@@ -1,0 +1,40 @@
+# 06c — Pipeline Loop Steps (modular)
+#
+# Agents are auto-discovered from agents/ subdirectory.
+# Iterative refinement: loop step repeats until condition agent says "PASS".
+#
+# Usage:
+#   rakitsu run examples/modular/06-advanced-strategies/pipeline-loop/config.yaml "Write a rate limiter middleware in Go"
+
+name: Iterative Code Improvement
+version: "1.0"
+description: Pipeline with loop — code is iteratively improved until quality passes.
+
+settings:
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+  defaults:
+    model: gpt-4o-mini
+    temperature: 0.3
+    max_tokens: 4096
+
+orchestrator:
+  name: CodePipeline
+  strategy: Pipeline
+  provider: openai
+  model: gpt-4o-mini
+  agents: [Coder, Reviewer]
+  pipeline:
+    steps:
+      - name: refine
+        type: loop
+        max_iterations: 3
+        condition_agent: Reviewer
+        condition_prompt: "Is this code production-ready? Answer PASS or FAIL with reasons."
+        steps:
+          - name: code
+            agent: Coder
+            task: Write or improve the code based on any prior feedback.

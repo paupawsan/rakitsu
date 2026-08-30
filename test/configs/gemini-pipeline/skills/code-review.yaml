@@ -1,0 +1,12 @@
+name: "code_review"
+description: "Thorough code review for bugs, style, and improvements"
+tools:
+  - "read_file"
+  - "search_files"
+prompt_template: |
+  Perform a thorough code review. For each finding provide:
+  1. File and line number
+  2. Severity: critical / high / medium / low
+  3. Category: bug, security, performance, style, maintainability
+  4. Description of the issue
+  5. Suggested fix with code example

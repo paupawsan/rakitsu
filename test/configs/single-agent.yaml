@@ -1,0 +1,52 @@
+name: "Test - Single Agent with Reflection"
+version: "1.0.0"
+description: "Tests reflection and ground-check on a single worker agent"
+
+settings:
+  default_provider: "openai"
+  api_keys:
+    openai: "${OPENAI_API_KEY}"
+  defaults:
+    model: "gpt-4o-mini"
+    temperature: 0.7
+    max_tokens: 4096
+
+tools:
+  - name: "list_files"
+    type: "cli"
+    description: "List files and directories"
+    command: "ls -la"
+    sandbox:
+      type: "local_restricted"
+      allowed_paths:
+        - "/workspace"
+      resource_limits:
+        timeout_sec: 10
+
+  - name: "read_file"
+    type: "fs"
+    description: "Read contents of a file"
+    operation: "read"
+    allowed_paths:
+      - "/workspace"
+
+agents:
+  - name: "File Analyzer"
+    role: "worker"
+    model: "gpt-4o-mini"
+    system_prompt: |
+      You are a file analysis expert. Examine files and directories to provide
+      clear, structured summaries. Be thorough but concise.
+    tools:
+      - "list_files"
+      - "read_file"
+    settings:
+      max_iterations: 8
+      verbose: true
+      reflection:
+        enabled: true
+        mode: "both"
+      ground_check:
+        enabled: true
+        confidence_threshold: 0.7
+        max_retries: 1

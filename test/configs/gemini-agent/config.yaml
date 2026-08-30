@@ -1,0 +1,23 @@
+# Modular version of gemini-agent.yaml
+#
+# Tests Gemini provider with API key or ADC auth.
+# Agent and tools auto-discovered from agents/ and tools/ directories.
+#
+# Usage:
+#   export GEMINI_API_KEY="..."
+#   rakitsu run -c test/configs/gemini-agent/config.yaml "Analyze workspace files"
+
+name: "Test - Gemini Provider"
+version: "1.0.0"
+description: "Tests Gemini provider with API key or ADC auth"
+
+settings:
+  default_provider: "gemini"
+  api_keys:
+    gemini: "${GEMINI_API_KEY}"
+  credentials_files:
+    gemini: "${GOOGLE_APPLICATION_CREDENTIALS:-test/configs/gemini-keys/service-account.json}"
+  defaults:
+    model: "gemini-3.1-flash-lite-preview"
+    temperature: 0.7
+    max_tokens: 4096

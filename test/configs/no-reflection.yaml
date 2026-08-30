@@ -1,0 +1,42 @@
+name: "Test - No Reflection (Baseline)"
+version: "1.0.0"
+description: "Baseline test without reflection to verify no regression"
+
+settings:
+  default_provider: "openai"
+  api_keys:
+    openai: "${OPENAI_API_KEY}"
+  defaults:
+    model: "gpt-4o-mini"
+    temperature: 0.7
+    max_tokens: 4096
+
+tools:
+  - name: "list_files"
+    type: "cli"
+    description: "List files and directories"
+    command: "ls -la"
+    sandbox:
+      type: "local_restricted"
+      allowed_paths:
+        - "/workspace"
+      resource_limits:
+        timeout_sec: 10
+
+  - name: "read_file"
+    type: "fs"
+    description: "Read contents of a file"
+    operation: "read"
+    allowed_paths:
+      - "/workspace"
+
+agents:
+  - name: "Basic Agent"
+    role: "worker"
+    model: "gpt-4o-mini"
+    system_prompt: "You are a helpful file analysis assistant."
+    tools:
+      - "list_files"
+      - "read_file"
+    settings:
+      max_iterations: 5

@@ -1,0 +1,55 @@
+# Mixed-provider pipeline: Gemini + vLLM Qwen
+#
+# Developer agent uses vLLM Qwen 3 8B (via LiteLLM proxy) for code generation.
+# Reviewer and Security agents use Gemini 2.5 Flash for analysis and reasoning.
+# Agents, tools auto-discovered from their directories.
+#
+# Usage:
+#   export GEMINI_API_KEY="..."
+#   rakitsu run -v --trace test/configs/mix-pipeline/config.yaml "Build a calculator module"
+
+name: "Mix Provider Dev Team (Gemini + vLLM)"
+version: "1.0.0"
+description: "3-agent pipeline mixing Gemini (analysis) and vLLM Qwen (code gen)"
+
+settings:
+  default_provider: "gemini"
+  providers:
+    litellm:
+      type: "openai"
+      api_key: "${LITELLM_API_KEY}"
+      base_url: "${LITELLM_BASE_URL}"
+  api_keys:
+    gemini: "${GEMINI_API_KEY}"
+  credentials_files:
+    gemini: "${GOOGLE_APPLICATION_CREDENTIALS:-test/configs/gemini-keys/service-account.json}"
+  allowed_commands:
+    - "python3"
+  defaults:
+    model: "gemini-3.1-flash-lite-preview"
+    temperature: 0.5
+    max_tokens: 1024
+
+orchestrator:
+  name: "Lead"
+  strategy: "Pipeline"
+  provider: "gemini"
+  model: "gemini-3.1-flash-lite-preview"
+  agents:
+    - "Developer"
+    - "Reviewer"
+    - "Security"
+  pipeline:
+    steps:
+      - name: "implement"
+        agent: "Developer"
+        task: "Write a Python calculator with add, subtract, multiply, divide functions. Save as ./test/workspace/calculator.py. Include input validation."
+      - name: "review"
+        type: "parallel"
+        steps:
+          - name: "code_review"
+            agent: "Reviewer"
+            task: "Review ./test/workspace/calculator.py for bugs and quality issues."
+          - name: "security_check"
+            agent: "Security"
+            task: "Check ./test/workspace/calculator.py for security vulnerabilities."

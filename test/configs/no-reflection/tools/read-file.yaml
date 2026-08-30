@@ -1,0 +1,6 @@
+name: "read_file"
+type: "fs"
+description: "Read contents of a file"
+operation: "read"
+allowed_paths:
+  - "/workspace"

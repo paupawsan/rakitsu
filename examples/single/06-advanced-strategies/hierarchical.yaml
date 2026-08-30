@@ -1,0 +1,75 @@
+# 06a — Hierarchical Strategy
+#
+# The supervisor LLM dynamically assigns tasks to workers based on content.
+# Behaves like ReAct but semantically framed as hierarchical delegation.
+# Requires a model with tool-calling support.
+#
+# Usage:
+#   rakitsu run examples/single/06-advanced-strategies/hierarchical.yaml "Review PR #42 for the payments service"
+
+name: Code Review Board
+version: "1.0"
+description: Hierarchical review board — supervisor assigns reviewers based on code area.
+
+settings:
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+  defaults:
+    model: gpt-4o
+    temperature: 0.2
+    max_tokens: 8192
+
+tools:
+  - name: read_file
+    type: fs
+    operation: read
+    allowed_paths:
+      - "."
+    description: Read source code files
+    parameters:
+      path: { type: string, description: "File path", required: true }
+
+agents:
+  - name: BackendReviewer
+    role: worker
+    system_prompt: |
+      You review backend code: APIs, database queries, business logic, error handling.
+      Focus on correctness, performance, and security.
+    tools: [read_file]
+    settings: { max_iterations: 3 }
+
+  - name: FrontendReviewer
+    role: worker
+    system_prompt: |
+      You review frontend code: components, state management, API calls, accessibility.
+      Focus on UX, performance, and maintainability.
+    tools: [read_file]
+    settings: { max_iterations: 3 }
+
+  - name: SecurityReviewer
+    role: worker
+    system_prompt: |
+      You review code for security issues: injection, auth flaws, data exposure, OWASP Top 10.
+      Flag any vulnerability with severity (critical/high/medium/low).
+    tools: [read_file]
+    settings: { max_iterations: 3 }
+
+orchestrator:
+  name: ReviewLead
+  strategy: Hierarchical
+  provider: openai
+  model: gpt-4o
+  system_prompt: |
+    You lead a code review board. Examine the files in the PR and assign
+    the appropriate reviewer based on the code area. Synthesize all reviews
+    into a final verdict: APPROVE, REQUEST_CHANGES, or BLOCK.
+  agents:
+    - BackendReviewer
+    - FrontendReviewer
+    - SecurityReviewer
+  handoff:
+    include_context: true
+    allow_cross_agent_calls: false

@@ -1,0 +1,11 @@
+name: list_files
+type: fs
+operation: list
+allowed_paths:
+  - "."
+description: List files in a directory
+parameters:
+  path:
+    type: string
+    description: Directory path
+    required: true

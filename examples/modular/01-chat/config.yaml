@@ -1,0 +1,21 @@
+# 01 — Chat Assistant (modular)
+#
+# Minimal config — the agent is auto-discovered from agents/assistant.md
+#
+# Usage:
+#   rakitsu run examples/modular/01-chat/config.yaml "Hello, who are you?"
+
+name: Chat Assistant
+version: "1.0"
+description: Minimal conversational assistant — no tools, no orchestration.
+
+settings:
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+  defaults:
+    model: gpt-4o-mini
+    temperature: 0.7
+    max_tokens: 2048

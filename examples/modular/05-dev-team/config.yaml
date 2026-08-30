@@ -1,0 +1,57 @@
+# 05 — Dev Team Pipeline (modular)
+#
+# Agents and tools are auto-discovered from subdirectories.
+# Only settings and orchestrator are defined here.
+#
+# Usage:
+#   rakitsu run examples/modular/05-dev-team/config.yaml "Add input validation to the user registration endpoint"
+
+name: Dev Team
+version: "1.0"
+description: General-purpose dev pipeline — plan, implement, verify, review.
+
+settings:
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+  defaults:
+    model: gpt-4o-mini
+    temperature: 0.3
+    max_tokens: 8192
+  execution:
+    max_iterations: 5
+    timeout_seconds: 600
+  allowed_commands:
+    - go
+    - python3
+    - node
+    - npm
+    - make
+    - git
+    - find
+    - grep
+    - cat
+    - ls
+
+orchestrator:
+  name: Lead
+  strategy: Pipeline
+  provider: openai
+  model: gpt-4o-mini
+  agents: [Planner, Developer, Verifier, Reviewer]
+  pipeline:
+    steps:
+      - name: plan
+        agent: Planner
+        task: Analyze the request and create a step-by-step implementation plan.
+      - name: implement
+        agent: Developer
+        task: Implement the plan using available tools.
+      - name: verify
+        agent: Verifier
+        task: Test the implementation. Run commands to verify correctness.
+      - name: review
+        agent: Reviewer
+        task: Review the code changes for quality, security, and best practices.

@@ -1,0 +1,13 @@
+name: run_command
+type: cli
+description: Run a shell command
+command: "sh -c '{{command}}'"
+parameters:
+  command:
+    type: string
+    description: Command to execute
+    required: true
+sandbox:
+  type: local_restricted
+  resource_limits:
+    timeout_sec: 30

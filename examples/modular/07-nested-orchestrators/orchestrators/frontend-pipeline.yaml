@@ -1,0 +1,17 @@
+name: FrontendPipeline
+strategy: Pipeline
+provider: openai
+model: gpt-4o-mini
+system_prompt: Manage the frontend team through design -> implement -> test.
+agents: [FrontendDesigner, FrontendDeveloper, FrontendTester]
+pipeline:
+  steps:
+    - name: design
+      agent: FrontendDesigner
+      task: Design the frontend UI components and user flow.
+    - name: implement
+      agent: FrontendDeveloper
+      task: Implement the frontend based on the design.
+    - name: test
+      agent: FrontendTester
+      task: Test the frontend for UI issues.

@@ -1,0 +1,46 @@
+# 01 — Chat Assistant (simplest possible config)
+#
+# Single agent, no tools, no orchestrator.
+# The agent runs a conversational ReAct loop and responds directly.
+#
+# Usage:
+#   rakitsu run examples/single/01-chat/config.yaml "Hello, who are you?"
+#
+# Runs keyless against local Ollama by default (https://ollama.com):
+#   ollama pull llama3.1:8b
+# Prefer a cloud model? Uncomment a provider under settings.providers below.
+
+name: Chat Assistant
+version: "1.0"
+description: Minimal conversational assistant — no tools, no orchestration.
+
+settings:
+  default_provider: ollama
+  providers:
+    ollama:
+      type: ollama
+      base_url: http://localhost:11434/v1
+    # Alternatives — uncomment one and set default_provider + defaults.model above:
+    # openai:
+    #   type: openai
+    #   api_key: ${OPENAI_API_KEY}
+    # anthropic:
+    #   type: anthropic
+    #   api_key: ${ANTHROPIC_API_KEY}
+    # litellm:
+    #   type: litellm
+    #   api_key: ${LITELLM_API_KEY:-not-needed}
+    #   base_url: ${LITELLM_BASE_URL:-http://localhost:4000}
+  defaults:
+    model: llama3.1:8b
+    temperature: 0.7
+    max_tokens: 2048
+
+agents:
+  - name: Assistant
+    role: worker
+    system_prompt: |
+      You are a helpful, friendly assistant. Answer questions clearly and concisely.
+      If you don't know something, say so honestly.
+    settings:
+      max_iterations: 1

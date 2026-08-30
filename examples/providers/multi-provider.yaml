@@ -1,0 +1,51 @@
+# Provider Reference: Multiple Providers + Fallback Chains
+#
+# Define multiple named providers. Each agent can use a different provider,
+# and agents can have ordered fallback chains for resilience.
+
+name: Multi-Provider Example
+version: "1.0"
+
+settings:
+  default_provider: primary    # Used when agent doesn't specify provider
+  providers:
+    primary:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+    fallback:
+      type: anthropic
+      api_key: ${ANTHROPIC_API_KEY}
+    local:
+      type: ollama
+      base_url: http://localhost:11434/v1
+  defaults:
+    model: gpt-4o-mini
+    temperature: 0.5
+    max_tokens: 4096
+
+agents:
+  # Uses default provider (primary/openai)
+  - name: DefaultAgent
+    role: worker
+    system_prompt: I use the default provider.
+
+  # Explicit provider override
+  - name: ClaudeAgent
+    role: worker
+    provider: fallback
+    model: claude-sonnet-4-6
+    system_prompt: I always use Anthropic Claude.
+
+  # Ordered fallback chain — tries each provider in order
+  - name: ResilientAgent
+    role: worker
+    providers:
+      - name: primary
+        model: gpt-4o
+      - name: fallback
+        model: claude-sonnet-4-6
+      - name: local
+        model: llama3.1:8b
+    system_prompt: |
+      I try OpenAI first, fall back to Anthropic, then to local Ollama.
+      This ensures I always have a working provider.

@@ -1,0 +1,11 @@
+name: "read_file"
+type: "fs"
+description: "Read the contents of a file"
+operation: "read"
+allowed_paths:
+  - "."
+parameters:
+  path:
+    type: "string"
+    description: "File path relative to cwd (e.g., './test/workspace/calculator.py')"
+    required: true

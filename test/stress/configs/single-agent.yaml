@@ -1,0 +1,28 @@
+name: stress-single-agent
+version: "1.0"
+description: Single agent with mock provider for stress testing
+
+settings:
+  default_provider: mock
+  defaults:
+    model: mock-model
+    temperature: 0.7
+    max_tokens: 1024
+  execution:
+    max_iterations: 10
+    timeout_seconds: 60
+
+tools:
+  - name: echo
+    type: cli
+    description: Echo tool
+    command: echo
+    allowed_args: ["*"]
+
+agents:
+  - name: worker
+    role: worker
+    provider: mock
+    model: mock-model
+    system_prompt: "You are a test worker agent."
+    tools: [echo]

@@ -1,0 +1,10 @@
+name: "list_files"
+type: "cli"
+description: "List files and directories"
+command: "ls -la"
+sandbox:
+  type: "local_restricted"
+  allowed_paths:
+    - "/workspace"
+  resource_limits:
+    timeout_sec: 10

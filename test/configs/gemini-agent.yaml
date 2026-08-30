@@ -1,0 +1,47 @@
+name: "Test - Gemini Provider"
+version: "1.0.0"
+description: "Tests Gemini provider with API key or ADC auth"
+
+settings:
+  default_provider: "gemini"
+  api_keys:
+    gemini: "${GEMINI_API_KEY}"
+  credentials_files:
+    gemini: "${GOOGLE_APPLICATION_CREDENTIALS:-test/configs/gemini-keys/service-account.json}"
+  defaults:
+    model: "gemini-3.1-flash-lite-preview"
+    temperature: 0.7
+    max_tokens: 4096
+
+tools:
+  - name: "list_files"
+    type: "cli"
+    description: "List files and directories"
+    command: "ls -la"
+    sandbox:
+      type: "local_restricted"
+      allowed_paths:
+        - "/workspace"
+      resource_limits:
+        timeout_sec: 10
+
+  - name: "read_file"
+    type: "fs"
+    description: "Read contents of a file"
+    operation: "read"
+    allowed_paths:
+      - "/workspace"
+
+agents:
+  - name: "Gemini Assistant"
+    role: "worker"
+    model: "gemini-3.1-flash-lite-preview"
+    system_prompt: |
+      You are a helpful file analysis assistant. Use the available tools
+      to explore files and directories. Be concise and accurate.
+    tools:
+      - "list_files"
+      - "read_file"
+    settings:
+      max_iterations: 5
+      verbose: true

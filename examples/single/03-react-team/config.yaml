@@ -1,0 +1,134 @@
+# 03 — ReAct Multi-Agent Team
+#
+# ReAct orchestrator with a supervisor that dynamically delegates to 3 specialist workers.
+# The supervisor LLM decides which agent to call based on the task — this requires
+# a model with strong tool-calling support (GPT-4o, Claude, etc.).
+#
+# For models without tool calling, use Pipeline strategy instead (see 04-pipeline).
+#
+# Usage:
+#   rakitsu run examples/single/03-react-team/config.yaml "Investigate why the API response time increased"
+
+name: Incident Triage Team
+version: "1.0"
+description: ReAct-based team for DevOps incident investigation with dynamic task delegation.
+
+settings:
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+  defaults:
+    model: gpt-4o
+    temperature: 0.2
+    max_tokens: 8192
+  execution:
+    max_iterations: 10
+    timeout_seconds: 300
+  allowed_commands:
+    - curl
+    - jq
+    - grep
+    - cat
+    - ls
+    - tail
+    - head
+    - wc
+
+tools:
+  - name: read_file
+    type: fs
+    operation: read
+    allowed_paths:
+      - "."
+    description: Read a log file or configuration file
+    parameters:
+      path: { type: string, description: "File path", required: true }
+
+  - name: search_logs
+    type: fs
+    operation: search
+    allowed_paths:
+      - "."
+    description: Search for patterns in log files
+    parameters:
+      pattern: { type: string, description: "Search pattern (regex)", required: true }
+      path: { type: string, description: "Directory or file to search", required: true }
+
+  - name: run_command
+    type: cli
+    description: Execute a diagnostic command
+    command: "sh -c '{{command}}'"
+    parameters:
+      command: { type: string, description: "Shell command", required: true }
+    sandbox:
+      type: local_restricted
+      resource_limits:
+        timeout_sec: 30
+
+skills:
+  - name: incident_triage
+    description: Standard incident investigation workflow
+    tools: [read_file, search_logs, run_command]
+    prompt_template: |
+      Follow this investigation workflow:
+      1. Check recent logs for errors or anomalies
+      2. Identify the root cause
+      3. Suggest immediate remediation steps
+      4. Recommend preventive measures
+
+agents:
+  - name: LogAnalyzer
+    role: worker
+    system_prompt: |
+      You are a log analysis specialist. Your job is to examine log files,
+      identify error patterns, correlate timestamps, and pinpoint anomalies.
+      Always cite specific log entries with timestamps in your findings.
+    tools: [read_file, search_logs]
+    skills: [incident_triage]
+    settings:
+      max_iterations: 5
+      reflection:
+        enabled: true
+        mode: after_tool
+        frequency: on_error
+
+  - name: InfraEngineer
+    role: worker
+    system_prompt: |
+      You are an infrastructure engineer. Diagnose system-level issues:
+      check resource utilization, network connectivity, service health,
+      and configuration problems. Use commands to gather diagnostic data.
+    tools: [run_command, read_file]
+    settings:
+      max_iterations: 5
+
+  - name: APISpecialist
+    role: worker
+    system_prompt: |
+      You are an API specialist. Analyze API endpoints, response times,
+      error rates, and request patterns. Test endpoints and verify
+      expected behavior. Focus on application-level issues.
+    tools: [run_command, read_file, search_logs]
+    settings:
+      max_iterations: 5
+
+orchestrator:
+  name: IncidentLead
+  strategy: ReAct
+  provider: openai
+  model: gpt-4o
+  system_prompt: |
+    You are the Incident Lead coordinating a triage team.
+    Analyze the reported issue, then delegate investigation tasks to your specialists.
+    Synthesize their findings into a clear incident report with root cause and remediation.
+  agents:
+    - LogAnalyzer
+    - InfraEngineer
+    - APISpecialist
+  routing:
+    auto_delegate_tools: true
+  handoff:
+    include_context: true
+    max_context_length: 6000
