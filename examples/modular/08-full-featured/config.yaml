@@ -1,0 +1,91 @@
+# 08 — Full Featured / Kitchen Sink (modular)
+#
+# Agents, tools, and skills are auto-discovered from subdirectories.
+# Demonstrates every config feature: provider fallback, reflection, ground check,
+# budgets, context management, vision, skills, inline tools, docker sandbox, synthesis.
+#
+# Usage:
+#   rakitsu run examples/modular/08-full-featured/config.yaml "Analyze the uploaded architecture diagram and generate a technical report"
+
+name: Enterprise Analysis Platform
+version: "1.0"
+description: |
+  Full-featured analysis platform demonstrating every config capability.
+  Uses provider fallback, reflection, ground-check, budgets, context management,
+  vision, skills, inline tools, and docker sandbox.
+
+settings:
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+      default_model: gpt-4o-mini
+    anthropic:
+      type: anthropic
+      api_key: ${ANTHROPIC_API_KEY}
+    ollama-embed:
+      type: ollama
+      base_url: http://localhost:11434/v1
+
+  defaults:
+    model: gpt-4o-mini
+    temperature: 0.3
+    max_tokens: 4096
+
+  execution:
+    max_iterations: 15
+    timeout_seconds: 600
+    max_total_tokens: 500000
+    max_cost: 2.00
+
+  pricing:
+    gpt-4o:
+      input: 2.50
+      output: 10.00
+    gpt-4o-mini:
+      input: 0.15
+      output: 0.60
+    claude-sonnet-4-6:
+      input: 3.00
+      output: 15.00
+
+  allowed_commands:
+    - find
+    - grep
+    - cat
+    - ls
+    - wc
+    - head
+
+orchestrator:
+  name: AnalysisPipeline
+  strategy: Pipeline
+  provider: openai
+  model: gpt-4o-mini
+  model_config:
+    temperature: 0.1
+  agents:
+    - Researcher
+    - VisionAnalyst
+    - Writer
+    - QAChecker
+  pipeline:
+    synthesis: true
+    synthesis_prompt: |
+      Compile the research findings, visual analysis, written report, and QA results
+      into a final comprehensive deliverable. Highlight key insights and any open issues.
+    steps:
+      - name: research
+        agent: Researcher
+        task: Research the topic thoroughly using all available tools.
+        timeout_sec: 120
+      - name: visual_analysis
+        agent: VisionAnalyst
+        task: Analyze any visual materials (diagrams, screenshots, charts).
+      - name: write
+        agent: Writer
+        task: Write the technical report based on all research and analysis.
+      - name: qa
+        agent: QAChecker
+        task: Validate the report for completeness, accuracy, and format.

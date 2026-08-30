@@ -1,0 +1,72 @@
+# Context Monitor Test — Mixed-model pipeline with step_log + sliding_window
+#
+# Tests the ContextMonitor with:
+#   - step_log strategy (Explorer, Analyzer, SecurityScanner)
+#   - sliding_window strategy (Reviewer)
+#   - Output fencing (<tool_output> delimiters)
+#   - Tool output truncation (max 6000 / 4000 chars)
+#   - Injection detection (scans for suspicious patterns)
+#   - Reflection (Analyzer, every 3 iterations)
+#   - Mixed models: vllm-qwen3-8b (content <tool_call>) + your-model-alias (native tool_calls)
+#   - no_stream_tools for qwen3, streaming for nemotron
+#
+# Uses LiteLLM proxy.
+#
+# Usage:
+#   rakitsu run --trace test/configs/context-monitor-test/config.yaml "Review test/workspace/ code, find bugs, suggest fixes"
+
+name: "Context Monitor Mixed-Model Test"
+version: "1.0.0"
+description: "Mixed-model pipeline: qwen3-8b + nemotron-30b via LiteLLM, testing ContextMonitor strategies"
+
+settings:
+  default_provider: "litellm"
+
+  providers:
+    litellm:
+      type: "openai"
+      api_key: "${LITELLM_API_KEY}"
+      base_url: "${LITELLM_BASE_URL}"
+
+  allowed_commands:
+    - "sh"
+    - "bash"
+    - "ls"
+    - "cat"
+    - "head"
+    - "tail"
+    - "find"
+    - "grep"
+    - "wc"
+    - "tree"
+    - "diff"
+    - "python3"
+    - "go"
+
+  defaults:
+    model: "your-model-alias"
+    temperature: 0.4
+    max_tokens: 4096
+
+orchestrator:
+  name: "Lead"
+  strategy: "Pipeline"
+  provider: "litellm"
+  model: "your-model-alias"
+  agents:
+    - "Explorer"
+    - "Analyzer"
+    - "Reviewer"
+  pipeline:
+    steps:
+      - name: "explore"
+        agent: "Explorer"
+      - name: "analyze"
+        agent: "Analyzer"
+      - name: "review"
+        type: "parallel"
+        steps:
+          - name: "code_review"
+            agent: "Reviewer"
+          - name: "security_scan"
+            agent: "SecurityScanner"

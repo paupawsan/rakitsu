@@ -1,0 +1,11 @@
+{
+  "name": "rakitsu-webui-probe",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "probe": "node probe.mjs"
+  },
+  "dependencies": {
+    "puppeteer-core": "^22.0.0"
+  }
+}

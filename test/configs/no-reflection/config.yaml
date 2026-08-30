@@ -1,0 +1,20 @@
+# Modular version of no-reflection.yaml
+#
+# Baseline test without reflection to verify no regression.
+# Agent and tools auto-discovered from agents/ and tools/ directories.
+#
+# Usage:
+#   rakitsu run -c test/configs/no-reflection/config.yaml "List and read files"
+
+name: "Test - No Reflection (Baseline)"
+version: "1.0.0"
+description: "Baseline test without reflection to verify no regression"
+
+settings:
+  default_provider: "openai"
+  api_keys:
+    openai: "${OPENAI_API_KEY}"
+  defaults:
+    model: "gpt-4o-mini"
+    temperature: 0.7
+    max_tokens: 4096

@@ -1,0 +1,17 @@
+name: BackendPipeline
+strategy: Pipeline
+provider: openai
+model: gpt-4o-mini
+system_prompt: Manage the backend team through design -> implement -> test.
+agents: [BackendDesigner, BackendDeveloper, BackendTester]
+pipeline:
+  steps:
+    - name: design
+      agent: BackendDesigner
+      task: Design the backend API architecture and data models.
+    - name: implement
+      agent: BackendDeveloper
+      task: Implement the backend based on the design.
+    - name: test
+      agent: BackendTester
+      task: Test the backend for bugs and edge cases.

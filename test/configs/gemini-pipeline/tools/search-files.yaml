@@ -1,0 +1,15 @@
+name: "search_files"
+type: "fs"
+description: "Search for a text pattern across files in a directory"
+operation: "search"
+allowed_paths:
+  - "./test/workspace/"
+parameters:
+  path:
+    type: "string"
+    description: "Base directory path to search in"
+    required: true
+  pattern:
+    type: "string"
+    description: "Text pattern to search for in file contents"
+    required: true

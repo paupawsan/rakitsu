@@ -1,0 +1,23 @@
+# Provider Reference: Google Gemini (direct + Vertex AI)
+name: Gemini Example
+version: "1.0"
+
+settings:
+  default_provider: gemini
+  providers:
+    gemini:
+      type: gemini
+      api_key: ${GEMINI_API_KEY}
+      # For Vertex AI (enterprise), add these:
+      # credentials_file: ./keys/service-account.json
+      # location: us-central1
+      # project: my-gcp-project
+  defaults:
+    model: gemini-2.5-flash
+    temperature: 0.5
+    max_tokens: 4096
+
+agents:
+  - name: Assistant
+    role: worker
+    system_prompt: You are a helpful assistant powered by Gemini.

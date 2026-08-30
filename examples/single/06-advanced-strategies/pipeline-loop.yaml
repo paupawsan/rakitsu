@@ -1,0 +1,62 @@
+# 06c — Pipeline Loop Steps
+#
+# Demonstrates iterative refinement: a loop step repeats until a condition agent
+# says "PASS". The condition agent evaluates quality after each iteration.
+#
+# Loop behavior:
+#   - Coder writes/fixes code
+#   - Reviewer evaluates quality
+#   - If Reviewer says "PASS" → loop exits
+#   - If not → loop continues (up to max_iterations)
+#
+# Usage:
+#   rakitsu run examples/single/06-advanced-strategies/pipeline-loop.yaml "Write a rate limiter middleware in Go"
+
+name: Iterative Code Improvement
+version: "1.0"
+description: Pipeline with loop — code is iteratively improved until quality passes.
+
+settings:
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+  defaults:
+    model: gpt-4o-mini
+    temperature: 0.3
+    max_tokens: 4096
+
+agents:
+  - name: Coder
+    role: worker
+    system_prompt: |
+      Write or improve code based on the task and any feedback from prior reviews.
+      If this is a revision, focus specifically on addressing the reviewer's feedback.
+    settings: { max_iterations: 3 }
+
+  - name: Reviewer
+    role: worker
+    system_prompt: |
+      Review the code for correctness, readability, and best practices.
+      Respond with PASS if the code is production-ready.
+      Respond with FAIL followed by specific issues if improvements are needed.
+    settings: { max_iterations: 1 }
+
+orchestrator:
+  name: CodePipeline
+  strategy: Pipeline
+  provider: openai
+  model: gpt-4o-mini
+  agents: [Coder, Reviewer]
+  pipeline:
+    steps:
+      - name: refine
+        type: loop
+        max_iterations: 3
+        condition_agent: Reviewer
+        condition_prompt: "Is this code production-ready? Answer PASS or FAIL with reasons."
+        steps:
+          - name: code
+            agent: Coder
+            task: Write or improve the code based on any prior feedback.

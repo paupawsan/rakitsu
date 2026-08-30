@@ -1,0 +1,21 @@
+# Provider Reference: Anthropic Claude (direct)
+name: Anthropic Example
+version: "1.0"
+
+settings:
+  default_provider: anthropic
+  providers:
+    anthropic:
+      type: anthropic
+      api_key: ${ANTHROPIC_API_KEY}
+  defaults:
+    model: claude-sonnet-4-6
+    temperature: 0.3
+    max_tokens: 4096
+
+agents:
+  - name: Assistant
+    role: worker
+    model_config:
+      max_thinking_tokens: 4096    # Enable extended thinking (min 1024)
+    system_prompt: You are a thoughtful assistant that reasons step by step.

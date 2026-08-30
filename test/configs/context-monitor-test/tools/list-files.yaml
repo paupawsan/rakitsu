@@ -1,0 +1,11 @@
+name: "list_files"
+type: "fs"
+description: "List files and directories at the given path"
+operation: "list"
+allowed_paths:
+  - "."
+parameters:
+  path:
+    type: "string"
+    description: "Directory path to list (e.g., './test/workspace/')"
+    required: true

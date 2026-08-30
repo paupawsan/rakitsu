@@ -1,0 +1,91 @@
+# 06d — Pipeline DAG Dependencies
+#
+# Steps with explicit depends_on create a directed acyclic graph (DAG).
+# Steps without dependencies run as early as possible. Steps with shared
+# dependencies can run in parallel once all their deps complete.
+#
+# Diamond pattern:   A
+#                   / \
+#                  B   C     ← B and C run in parallel (both depend on A)
+#                   \ /
+#                    D       ← D waits for both B and C
+#                    |
+#                    E       ← E waits for D
+#
+# Usage:
+#   rakitsu run examples/single/06-advanced-strategies/pipeline-dag.yaml "Generate a REST API from this OpenAPI spec"
+
+name: Code Generation DAG
+version: "1.0"
+description: DAG pipeline — parallel code generation with dependency ordering.
+
+settings:
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+  defaults:
+    model: gpt-4o-mini
+    temperature: 0.3
+    max_tokens: 4096
+
+agents:
+  - name: SchemaParser
+    role: worker
+    system_prompt: Parse the API specification and extract all endpoints, models, and relationships.
+    settings: { max_iterations: 2 }
+
+  - name: APIGenerator
+    role: worker
+    system_prompt: Generate API route handlers and controllers from the parsed schema.
+    settings: { max_iterations: 3 }
+
+  - name: TypeGenerator
+    role: worker
+    system_prompt: Generate type definitions, interfaces, and validation schemas from the parsed models.
+    settings: { max_iterations: 3 }
+
+  - name: TestGenerator
+    role: worker
+    system_prompt: Generate test cases for all API endpoints and type validations.
+    settings: { max_iterations: 3 }
+
+  - name: Validator
+    role: worker
+    system_prompt: |
+      Validate that generated code, types, and tests are consistent.
+      Check for missing endpoints, type mismatches, and incomplete test coverage.
+    settings: { max_iterations: 2 }
+
+orchestrator:
+  name: CodeGenPipeline
+  strategy: Pipeline
+  provider: openai
+  model: gpt-4o-mini
+  agents: [SchemaParser, APIGenerator, TypeGenerator, TestGenerator, Validator]
+  pipeline:
+    steps:
+      - name: parse
+        agent: SchemaParser
+        task: Parse the API specification.
+
+      - name: generate_api
+        agent: APIGenerator
+        task: Generate API handlers from the schema.
+        depends_on: [parse]
+
+      - name: generate_types
+        agent: TypeGenerator
+        task: Generate type definitions from the schema.
+        depends_on: [parse]
+
+      - name: generate_tests
+        agent: TestGenerator
+        task: Generate tests for the API and types.
+        depends_on: [generate_api, generate_types]
+
+      - name: validate
+        agent: Validator
+        task: Validate consistency across all generated code.
+        depends_on: [generate_tests]

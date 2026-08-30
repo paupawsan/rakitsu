@@ -1,0 +1,214 @@
+# Small-context dev team — Nemotron 30B + Qwen3 8B via LiteLLM
+#
+# Designed to work within a 4096-token context budget per agent.
+# Leverages: auto context strategy, retrieval, retry, thinking offload.
+#
+# Usage:
+#   export LITELLM_API_KEY="sk-..."
+#   export LITELLM_BASE_URL="https://..."
+#   rakitsu run -v --trace test/configs/litellm-dev-team/config.yaml "Build a Go CLI todo app under ./test/workspace/todo/"
+
+name: "LiteLLM Dev Team (Small Context)"
+version: "1.0.0"
+description: "5-agent pipeline on Nemotron 30B + Qwen3 8B, tuned for 4096-token context windows"
+
+settings:
+  default_provider: "litellm"
+
+  providers:
+    litellm:
+      type: "openai"
+      api_key: "${LITELLM_API_KEY}"
+      base_url: "${LITELLM_BASE_URL}"
+
+  # SECURITY NOTE: sh/bash below are on rakitsu's system command whitelist
+  # regardless of this list, so this allowlist is a footgun fence, not a
+  # sandbox boundary — a tool using run_command still runs whatever shell
+  # syntax the agent produces. Rakitsu trusts its own config; don't treat
+  # this as isolation from a malicious or compromised agent.
+  allowed_commands:
+    - "go"
+    - "python3"
+    - "pip"
+    - "node"
+    - "npm"
+    - "make"
+    - "git"
+    - "ls"
+    - "cat"
+    - "head"
+    - "tail"
+    - "find"
+    - "grep"
+    - "tree"
+    - "mkdir"
+    - "sh"
+    - "bash"
+
+  defaults:
+    model: "your-model-alias"
+    temperature: 0.3
+    max_tokens: 2048         # Nemotron <think> blocks consume tokens — need headroom for actual output
+
+orchestrator:
+  name: "Lead"
+  strategy: "Pipeline"
+  provider: "litellm"
+  model: "your-model-alias"
+  agents:
+    - "Planner"
+    - "Developer"
+    - "Verifier"
+    - "Reviewer"
+    - "Security"
+  pipeline:
+    steps:
+      - name: "plan"
+        agent: "Planner"
+
+      - name: "implement"
+        agent: "Developer"
+        depends_on: ["plan"]
+
+      - name: "verify"
+        agent: "Verifier"
+        depends_on: ["implement"]
+
+      - name: "review"
+        type: "parallel"
+        depends_on: ["verify"]
+        steps:
+          - name: "code_review"
+            agent: "Reviewer"
+          - name: "security_check"
+            agent: "Security"
+
+# ─── Agents ───────────────────────────────────────────────────────────────────
+
+agents:
+  - name: "Planner"
+    role: "worker"
+    provider: "litellm"
+    model: "your-model-alias"
+    model_config:
+      max_tokens: 2048
+      timeout_sec: 120
+    tools:
+      - "read_file"
+      - "list_files"
+      - "run_command"
+    settings:
+      max_iterations: 6
+      context_strategy: "auto"  # escalates: full → sliding_window → step_log → retrieval
+      context:
+        retrieval:
+          enabled: true
+          top_k: 3
+          error_bias: 2.0
+    system_prompt_file: "agents/planner.md"
+
+  - name: "Developer"
+    role: "worker"
+    provider: "litellm"
+    model: "vllm-qwen3-8b"      # Qwen3 8B for code generation
+    model_config:
+      max_tokens: 4096          # allow full file output per iteration
+      timeout_sec: 240
+    tools:
+      - "write_file"
+      - "read_file"
+      - "list_files"
+      # run_command intentionally excluded: models abuse it to write files via
+      # cat/heredoc, which strips newlines. write_file is the only correct path.
+    settings:
+      max_iterations: 10
+      context_strategy: "auto"
+      context:
+        retrieval:
+          enabled: true
+          top_k: 4
+          error_bias: 3.0       # heavily weight failed tool calls — learn from mistakes fast
+    system_prompt_file: "agents/developer.md"
+
+  - name: "Verifier"
+    role: "worker"
+    provider: "litellm"
+    model: "vllm-qwen3-8b"
+    model_config:
+      max_tokens: 1024
+      timeout_sec: 120
+    tools:
+      - "read_file"
+      - "list_files"
+      - "run_command"
+    settings:
+      max_iterations: 5
+      context_strategy: "auto"
+      context:
+        retrieval:
+          enabled: true
+          top_k: 3
+          error_bias: 2.0
+    system_prompt: |
+      You are a build verifier. Your only job is to check that the implementation compiles and runs.
+
+      Steps:
+      1. Use list_files to find what was created under ./test/workspace/
+      2. Use run_command to build/run the project (e.g. 'go build ./...' or 'python3 main.py --help')
+      3. Report: PASS (with output) or FAIL (with exact error)
+
+      Keep your response short. No suggestions — just verify it works.
+
+  - name: "Reviewer"
+    role: "worker"
+    provider: "litellm"
+    model: "your-model-alias"
+    model_config:
+      max_tokens: 2048
+      timeout_sec: 120
+    tools:
+      - "read_file"
+      - "list_files"
+    settings:
+      max_iterations: 4
+      context_strategy: "auto"
+      context:
+        retrieval:
+          enabled: true
+          top_k: 3
+          error_bias: 2.0
+    system_prompt_file: "agents/reviewer.md"
+
+  - name: "Security"
+    role: "worker"
+    provider: "litellm"
+    model: "your-model-alias"
+    model_config:
+      max_tokens: 1024
+      timeout_sec: 120
+    tools:
+      - "read_file"
+    settings:
+      max_iterations: 3
+      context_strategy: "auto"
+      context:
+        retrieval:
+          enabled: true
+          top_k: 2
+          error_bias: 2.0
+    system_prompt: |
+      You are a security auditor. Read the code and check for:
+      - Injection vulnerabilities (shell, SQL, path traversal)
+      - Hardcoded secrets or credentials
+      - Missing input validation
+      - Insecure defaults
+
+      Be concise. List findings with severity (HIGH/MEDIUM/LOW). If nothing found, say CLEAN.
+
+# ─── Tools ────────────────────────────────────────────────────────────────────
+
+tools:
+  - include: "tools/write-file.yaml"
+  - include: "tools/read-file.yaml"
+  - include: "tools/list-files.yaml"
+  - include: "tools/run-command.yaml"

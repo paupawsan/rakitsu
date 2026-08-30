@@ -1,0 +1,145 @@
+# Reduced Multi-Agent Pipeline via LiteLLM Proxy
+#
+# Optimized for smaller, slower self-hosted models behind a reverse proxy
+# with a long request timeout.
+# Key changes vs full pipeline:
+#   - Lower max_tokens (1024) to reduce generation time
+#   - Per-agent timeout_sec → X-LiteLLM-Timeout header
+#   - Fewer iterations to prevent context snowballing
+#   - Reflection disabled (doubles LLM calls per iteration)
+#   - 3 agents instead of 5, simpler tasks
+#
+# Pipeline: Developer → Reviewer + Security (parallel)
+
+name: "LiteLLM Dev Team (Reduced)"
+version: "1.0.0"
+description: "3-agent pipeline optimized for a slower self-hosted model behind a reverse proxy"
+
+settings:
+  default_provider: "litellm"
+
+  # Named provider instances — agents reference these by name
+  providers:
+    litellm:
+      type: "openai"
+      api_key: "${LITELLM_API_KEY}"
+      base_url: "${LITELLM_BASE_URL}"
+
+  allowed_commands:
+    - "python3"
+  defaults:
+    model: "your-model-alias"
+    temperature: 0.5
+    max_tokens: 1024
+
+tools:
+  - name: "read_file"
+    type: "fs"
+    description: "Read a file's contents"
+    operation: "read"
+    allowed_paths:
+      - "./test/workspace/"
+    parameters:
+      path:
+        type: "string"
+        description: "File path (e.g., './test/workspace/app.py')"
+        required: true
+
+  - name: "write_file"
+    type: "fs"
+    description: "Write content to a file"
+    operation: "write"
+    allowed_paths:
+      - "./test/workspace/"
+    parameters:
+      path:
+        type: "string"
+        description: "File path (e.g., './test/workspace/calculator.py')"
+        required: true
+      content:
+        type: "string"
+        description: "Content to write"
+        required: true
+
+  - name: "list_files"
+    type: "fs"
+    description: "List files in a directory"
+    operation: "list"
+    allowed_paths:
+      - "./test/workspace/"
+    parameters:
+      path:
+        type: "string"
+        description: "Directory path (e.g., './test/workspace/')"
+        required: true
+
+agents:
+  # Developer: write code to files
+  - name: "Developer"
+    role: "worker"
+    model: "your-model-alias"
+    model_config:
+      timeout_sec: 120
+    system_prompt: |
+      You are a Python developer. Write code and save it using write_file.
+      ALL files MUST go under ./test/workspace/ (e.g., ./test/workspace/calculator.py).
+      Keep code simple and concise. No subdirectories.
+    tools:
+      - "write_file"
+      - "list_files"
+    settings:
+      max_iterations: 4
+
+  # Reviewer: read and review code
+  - name: "Reviewer"
+    role: "worker"
+    model: "your-model-alias"
+    model_config:
+      timeout_sec: 300
+    system_prompt: |
+      You are a code reviewer. Read files in ./test/workspace/ and identify
+      bugs, missing error handling, and quality issues. Be concise.
+    tools:
+      - "read_file"
+      - "list_files"
+    settings:
+      max_iterations: 3
+
+  # Security: check for vulnerabilities
+  - name: "Security"
+    role: "worker"
+    model: "your-model-alias"
+    model_config:
+      timeout_sec: 120
+    system_prompt: |
+      You are a security auditor. Read files in ./test/workspace/ and check
+      for injection flaws, input validation gaps, and insecure defaults. Be concise.
+    tools:
+      - "read_file"
+    settings:
+      max_iterations: 3
+
+orchestrator:
+  name: "Lead"
+  strategy: "Pipeline"
+  agents:
+    - "Developer"
+    - "Reviewer"
+    - "Security"
+  pipeline:
+    steps:
+      # Step 1: Developer writes code
+      - name: "implement"
+        agent: "Developer"
+        task: "Write a Python calculator with add, subtract, multiply, divide functions. Save as ./test/workspace/calculator.py. Include input validation."
+
+      # Step 2: Review + Security in parallel
+      - name: "review"
+        type: "parallel"
+        steps:
+          - name: "code_review"
+            agent: "Reviewer"
+            task: "Review ./test/workspace/calculator.py for bugs and quality issues."
+          - name: "security_check"
+            agent: "Security"
+            task: "Check ./test/workspace/calculator.py for security vulnerabilities."

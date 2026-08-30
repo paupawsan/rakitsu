@@ -1,0 +1,54 @@
+# Modular version of litellm-multi-agent.yaml
+#
+# 3-agent pipeline optimized for a slower self-hosted model behind a reverse proxy.
+# Agents and tools auto-discovered from agents/ and tools/ directories.
+#
+# Pipeline: Developer -> Reviewer + Security (parallel)
+#
+# Usage:
+#   rakitsu run -c test/configs/litellm-pipeline/config.yaml "Build a calculator"
+
+name: "LiteLLM Dev Team (Reduced)"
+version: "1.0.0"
+description: "3-agent pipeline optimized for a slower self-hosted model behind a reverse proxy"
+
+settings:
+  default_provider: "litellm"
+
+  providers:
+    litellm:
+      type: "openai"
+      api_key: "${LITELLM_API_KEY}"
+      base_url: "${LITELLM_BASE_URL}"
+
+  allowed_commands:
+    - "python3"
+  defaults:
+    model: "your-model-alias"
+    temperature: 0.5
+    max_tokens: 1024
+
+orchestrator:
+  name: "Lead"
+  strategy: "Pipeline"
+  provider: "litellm"
+  model: "your-model-alias"
+  agents:
+    - "Developer"
+    - "Reviewer"
+    - "Security"
+  pipeline:
+    steps:
+      - name: "implement"
+        agent: "Developer"
+        task: "Write a Python calculator with add, subtract, multiply, divide functions. Save as ./test/workspace/calculator.py. Include input validation."
+
+      - name: "review"
+        type: "parallel"
+        steps:
+          - name: "code_review"
+            agent: "Reviewer"
+            task: "Review ./test/workspace/calculator.py for bugs and quality issues."
+          - name: "security_check"
+            agent: "Security"
+            task: "Check ./test/workspace/calculator.py for security vulnerabilities."

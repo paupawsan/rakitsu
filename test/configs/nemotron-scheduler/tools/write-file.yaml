@@ -1,0 +1,15 @@
+name: "write_file"
+type: "fs"
+description: "Write content to a file. Creates parent directories if needed."
+operation: "write"
+allowed_paths:
+  - "."
+parameters:
+  path:
+    type: "string"
+    description: "File path relative to cwd (e.g., './output/main.go', './src/app.py')"
+    required: true
+  content:
+    type: "string"
+    description: "Content to write to the file"
+    required: true

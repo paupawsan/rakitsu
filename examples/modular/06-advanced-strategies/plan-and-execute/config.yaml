@@ -1,0 +1,40 @@
+# 06b — PlanAndExecute Strategy (modular)
+#
+# Agents and tools are auto-discovered from subdirectories.
+# Two-phase approach: Planner creates a plan, Executor runs each step.
+#
+# Usage:
+#   rakitsu run examples/modular/06-advanced-strategies/plan-and-execute/config.yaml "Migrate the users table to add email verification"
+
+name: Database Migration
+version: "1.0"
+description: Plan-first approach for database migrations — analyze, plan, then execute.
+
+settings:
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+  defaults:
+    model: gpt-4o
+    temperature: 0.2
+    max_tokens: 8192
+  allowed_commands:
+    - psql
+    - pg_dump
+    - cat
+    - ls
+
+orchestrator:
+  name: MigrationLead
+  strategy: PlanAndExecute
+  provider: openai
+  model: gpt-4o
+  system_prompt: |
+    You coordinate a database migration. First, delegate to the Planner
+    to analyze and create a migration plan. Then delegate to the Executor
+    to run each step. Verify the final state matches expectations.
+  agents:
+    - Planner
+    - Executor

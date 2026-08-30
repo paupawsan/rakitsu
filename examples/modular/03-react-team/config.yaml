@@ -1,0 +1,53 @@
+# 03 — ReAct Multi-Agent Team (modular)
+#
+# Agents, tools, and skills are auto-discovered from subdirectories.
+# Only settings and orchestrator are defined here.
+#
+# Usage:
+#   rakitsu run examples/modular/03-react-team/config.yaml "Investigate why the API response time increased"
+
+name: Incident Triage Team
+version: "1.0"
+description: ReAct-based team for DevOps incident investigation with dynamic task delegation.
+
+settings:
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+  defaults:
+    model: gpt-4o
+    temperature: 0.2
+    max_tokens: 8192
+  execution:
+    max_iterations: 10
+    timeout_seconds: 300
+  allowed_commands:
+    - curl
+    - jq
+    - grep
+    - cat
+    - ls
+    - tail
+    - head
+    - wc
+
+orchestrator:
+  name: IncidentLead
+  strategy: ReAct
+  provider: openai
+  model: gpt-4o
+  system_prompt: |
+    You are the Incident Lead coordinating a triage team.
+    Analyze the reported issue, then delegate investigation tasks to your specialists.
+    Synthesize their findings into a clear incident report with root cause and remediation.
+  agents:
+    - LogAnalyzer
+    - InfraEngineer
+    - APISpecialist
+  routing:
+    auto_delegate_tools: true
+  handoff:
+    include_context: true
+    max_context_length: 6000

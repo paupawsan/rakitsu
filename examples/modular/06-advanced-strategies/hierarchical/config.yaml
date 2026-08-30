@@ -1,0 +1,39 @@
+# 06a — Hierarchical Strategy (modular)
+#
+# Agents and tools are auto-discovered from subdirectories.
+# The supervisor LLM dynamically assigns tasks to workers.
+#
+# Usage:
+#   rakitsu run examples/modular/06-advanced-strategies/hierarchical/config.yaml "Review PR #42 for the payments service"
+
+name: Code Review Board
+version: "1.0"
+description: Hierarchical review board — supervisor assigns reviewers based on code area.
+
+settings:
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+  defaults:
+    model: gpt-4o
+    temperature: 0.2
+    max_tokens: 8192
+
+orchestrator:
+  name: ReviewLead
+  strategy: Hierarchical
+  provider: openai
+  model: gpt-4o
+  system_prompt: |
+    You lead a code review board. Examine the files in the PR and assign
+    the appropriate reviewer based on the code area. Synthesize all reviews
+    into a final verdict: APPROVE, REQUEST_CHANGES, or BLOCK.
+  agents:
+    - BackendReviewer
+    - FrontendReviewer
+    - SecurityReviewer
+  handoff:
+    include_context: true
+    allow_cross_agent_calls: false

@@ -1,0 +1,52 @@
+# 11 — Vision Chat (M1.5 phase 1: image attachments)
+#
+# Single agent, no tools, no orchestrator — same shape as 01-chat, but with
+# vision: true so it can be used with `rakitsu run ... --attach`.
+#
+# Usage:
+#   rakitsu run examples/single/11-vision-chat/config.yaml "what is in this image?" \
+#     --attach /path/to/photo.png
+#
+# `--attach` requires a vision-capable model. Not every provider/model
+# combination supports images — pick one that does (e.g. gpt-4o, a Claude 3+
+# model, gemini-*, or a vLLM-served VL model via litellm/ollama).
+#
+# Runs keyless against local Ollama by default (https://ollama.com), but
+# ollama's llama3.1:8b is NOT vision-capable — swap in a VL model or
+# uncomment a cloud provider below before using --attach for real.
+
+name: Vision Chat
+version: "1.0"
+description: Minimal single-agent config with vision enabled, for testing --attach.
+
+settings:
+  default_provider: ollama
+  providers:
+    ollama:
+      type: ollama
+      base_url: http://localhost:11434/v1
+    # Alternatives — uncomment one and set default_provider + defaults.model above:
+    # openai:
+    #   type: openai
+    #   api_key: ${OPENAI_API_KEY}
+    # anthropic:
+    #   type: anthropic
+    #   api_key: ${ANTHROPIC_API_KEY}
+    # litellm:
+    #   type: litellm
+    #   api_key: ${LITELLM_API_KEY:-not-needed}
+    #   base_url: ${LITELLM_BASE_URL:-http://localhost:4000}
+  defaults:
+    model: llama3.1:8b
+    temperature: 0.7
+    max_tokens: 2048
+
+agents:
+  - name: VisionAssistant
+    role: worker
+    vision: true
+    system_prompt: |
+      You are a helpful assistant that can see and describe attached images.
+      Describe what you observe clearly and concisely.
+    settings:
+      max_iterations: 1

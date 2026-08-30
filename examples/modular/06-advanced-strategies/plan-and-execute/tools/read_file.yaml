@@ -1,0 +1,15 @@
+name: read_file
+type: fs
+operation: read
+# NOTE: "." grants access to the whole working directory, including any
+# .env/credentials that happen to live there. Not a path-traversal risk
+# (the fs tool resolves to an absolute, symlink-resolved path and rejects
+# anything outside this root) — scope this narrower in real deployments.
+allowed_paths:
+  - "."
+description: Read migration files or schema definitions
+parameters:
+  path:
+    type: string
+    description: File path
+    required: true

@@ -1,0 +1,22 @@
+# Provider Reference: Ollama (local models)
+name: Ollama Example
+version: "1.0"
+
+settings:
+  default_provider: ollama
+  providers:
+    ollama:
+      type: ollama
+      base_url: http://localhost:11434/v1    # Ollama's OpenAI-compatible endpoint
+      # api_key not needed for local Ollama
+  defaults:
+    model: llama3.1:8b
+    temperature: 0.7
+    max_tokens: 2048
+
+agents:
+  - name: Assistant
+    role: worker
+    model_config:
+      no_stream_tools: true    # Some Ollama models need this for tool calling
+    system_prompt: You are a helpful local assistant.

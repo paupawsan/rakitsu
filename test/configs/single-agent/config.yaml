@@ -1,0 +1,20 @@
+# Modular version of single-agent.yaml
+#
+# Tests reflection and ground-check on a single worker agent.
+# Agent and tools auto-discovered from agents/ and tools/ directories.
+#
+# Usage:
+#   rakitsu run -c test/configs/single-agent/config.yaml "Analyze the workspace files"
+
+name: "Test - Single Agent with Reflection"
+version: "1.0.0"
+description: "Tests reflection and ground-check on a single worker agent"
+
+settings:
+  default_provider: "openai"
+  api_keys:
+    openai: "${OPENAI_API_KEY}"
+  defaults:
+    model: "gpt-4o-mini"
+    temperature: 0.7
+    max_tokens: 4096
