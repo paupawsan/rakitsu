@@ -216,6 +216,84 @@ func TestDeleteSession_RemovesChatTree(t *testing.T) {
 	}
 }
 
+// TestDeleteSession_ClearsCurrentSession regression-guards: DeleteSession
+// didn't check the deleted id against s.current, so deleting the currently-
+// active session (no EndSession call yet — e.g. a still-running pipeline
+// step) left s.current pointing at metadata for a session that no longer
+// exists on disk. Two deterministic consequences followed, no race needed:
+// a later WriteCheckpoint recreated the just-deleted checkpoint file, and
+// the eventual EndSession call re-added the session to the index via
+// updateIndex's append-if-not-found fallback — resurrecting a deleted
+// session. Both must be prevented once DeleteSession targets s.current.
+func TestDeleteSession_ClearsCurrentSession(t *testing.T) {
+	s := newTestStore(t)
+	id := startTestSession(t, s)
+
+	// Delete the still-active current session directly — no EndSession first.
+	if err := s.DeleteSession(id); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+
+	if got := s.CurrentSessionID(); got != "" {
+		t.Errorf("CurrentSessionID() = %q after deleting the current session, want empty", got)
+	}
+
+	// A checkpoint write from the still-running pipeline step must not
+	// recreate the file for the now-deleted session.
+	if err := s.WriteCheckpoint(StoreCheckpointData{
+		SessionID:      id,
+		CompletedSteps: []string{"step"},
+		Results:        map[string]StoreStepResult{},
+	}); err == nil {
+		t.Error("WriteCheckpoint succeeded after its session was deleted, want an error")
+	}
+	if s.HasCheckpoint(id) {
+		t.Error("checkpoint file was recreated for a session deleted while it was current")
+	}
+
+	// EndSession must be a no-op now, not resurrect the deleted session.
+	s.EndSession(SessionSuccess)
+	sessions, err := s.ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	for _, sess := range sessions {
+		if sess.ID == id {
+			t.Errorf("deleted session %q resurrected in the index by EndSession", id)
+		}
+	}
+}
+
+// TestDeleteSession_ClosesOpenFileHandle regression-guards: DeleteSession
+// cleared s.current but never closed s.file, so a still-running pipeline
+// step's WriteEvent calls (which only check s.file == nil, not s.current)
+// kept appending to the file handle after the JSONL file itself had already
+// been unlinked from disk -- a leaked fd for the lifetime of the process,
+// writing into space nothing could ever read back.
+func TestDeleteSession_ClosesOpenFileHandle(t *testing.T) {
+	s := newTestStore(t)
+	id := startTestSession(t, s)
+
+	s.WriteEvent(telemetry.AgentEvent{EventType: "TEST"})
+	if s.file == nil {
+		t.Fatal("s.file should be open after StartSession + WriteEvent")
+	}
+
+	if err := s.DeleteSession(id); err != nil {
+		t.Fatalf("DeleteSession: %v", err)
+	}
+	if s.file != nil {
+		t.Error("s.file was not closed/cleared by DeleteSession — the handle to the just-unlinked JSONL file leaked")
+	}
+
+	// A write after deletion must be a true no-op, not silently succeed into
+	// the leaked handle.
+	s.WriteEvent(telemetry.AgentEvent{EventType: "TEST_AFTER_DELETE"})
+	if s.file != nil {
+		t.Error("WriteEvent resurrected s.file after the session was deleted")
+	}
+}
+
 // TestDeleteSession_ConcurrentWithStartSessionIndexRace regression-guards
 // finding 19: DeleteSession used to read-modify-write sessions.json without
 // holding s.mu, so on one shared *SessionStore instance (the shape

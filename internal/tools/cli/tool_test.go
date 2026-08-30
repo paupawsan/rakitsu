@@ -566,3 +566,23 @@ func TestExecute_OutputTruncationDisabledWithNegativeOne(t *testing.T) {
 		t.Errorf("truncation marker should not be present")
 	}
 }
+
+func TestBuildDockerArgs_HardensContainer(t *testing.T) {
+	sandbox := &config.SandboxConfig{
+		Type:            "docker",
+		MountWorkdir:    true,
+		NetworkIsolated: true,
+	}
+	args := buildDockerArgs(sandbox, []string{"echo", "hi"})
+
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--read-only") {
+		t.Errorf("docker args missing --read-only, got: %v", args)
+	}
+	if !strings.Contains(joined, "--security-opt no-new-privileges") {
+		t.Errorf("docker args missing --security-opt no-new-privileges, got: %v", args)
+	}
+	if !strings.Contains(joined, "--tmpfs /tmp") {
+		t.Errorf("docker args missing a writable /tmp tmpfs (needed since --read-only locks the rest of the root fs), got: %v", args)
+	}
+}
