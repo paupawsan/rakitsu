@@ -1,0 +1,66 @@
+/* Rakitsu EDA/LabVIEW Theme — Design Tokens */
+:root {
+  /* Surfaces (darkest → lightest) */
+  --surface-0: #12121f;
+  --surface-1: #1a1a2e;
+  --surface-2: #1e1e32;
+  --surface-3: #252540;
+  --surface-4: #2a2a45;
+
+  /* Canvas */
+  --canvas-bg: #1a1a2e;
+  --canvas-grid-color: rgba(255, 255, 255, 0.08);
+
+  /* Borders */
+  --border-subtle: #2a2a3e;
+  --border-default: #3a3a50;
+  --border-focus: #5b8def;
+
+  /* Node */
+  --node-bg: #252540;
+  --node-border: #3a3a50;
+  --node-radius: 3px;
+
+  /* Text — adjusted for WCAG contrast on dark surfaces */
+  --text-primary: #e0e0e0;
+  --text-secondary: #9a9ab0;
+  --text-muted: #777790;
+  --text-label: #8888a0;
+
+  /* Accent — node types */
+  --accent-agent: #5b8def;
+  --accent-tool: #2dd4a0;
+  --accent-skill: #c084fc;
+  --accent-orch: #f472b6;
+
+  /* Accent — group types */
+  --accent-group-pipeline: #5b8def;
+  --accent-group-parallel: #2dd4a0;
+  --accent-group-team: #c084fc;
+  --accent-group-generic: #666;
+
+  /* Status LEDs */
+  --status-running: #22c55e;
+  --status-paused: #f59e0b;
+  --status-success: #22c55e;
+  --status-error: #ef4444;
+  --status-pending: #555;
+
+  /* LED sizing */
+  --led-size: 6px;
+
+  /* Handle (pin) dimensions */
+  --handle-width: 8px;
+  --handle-height: 4px;
+  --handle-radius: 1px;
+
+  /* Typography */
+  --font-mono: 'SF Mono', 'Fira Code', 'Consolas', 'Monaco', monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+
+  /* Input fields */
+  --input-bg: #1a1a2e;
+  --input-border: #3a3a50;
+  --input-text: #e0e0e0;
+  --input-placeholder: #666680;
+}

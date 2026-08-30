@@ -91,7 +91,7 @@ test/webui/package-lock.json
 # Superpowers SDD scratch (progress ledger, briefs) — local only
 .superpowers/
 
-# WHOA launch-asset raw recordings — large binaries, never committed.
+# Launch-asset raw recordings — large binaries, never committed.
 # The script + config + session JSONL receipts under this dir DO get
 # committed; only the video files are excluded.
 docs/internal/assets/launch/*.mov

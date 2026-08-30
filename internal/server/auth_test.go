@@ -69,6 +69,11 @@ func TestRequiresAuth(t *testing.T) {
 		{"POST", "/api/debug/params"},
 		{"GET", "/api/debug/state"},
 		{"DELETE", "/api/configs/abc123"},
+		{"POST", "/mcp"},          // MCP executes arbitrary registered tools, no auth of its own
+		{"POST", "/mcp/anything"}, // standalone --mcp-port server has nothing else mounted on it
+		{"POST", "/a2a"},          // same shape as MCP: full tool-execution surface
+		{"GET", "/api/providers/models"},     // outbound-request proxy, SSRF-adjacent
+		{"GET", "/api/providers/model-info"}, // same endpoint shape as above
 	}
 	for _, c := range protected {
 		r := httptest.NewRequest(c.method, c.path, nil)

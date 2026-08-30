@@ -71,7 +71,7 @@ type SessionMsgConfig struct {
 // Enabled, every top-level agent (and the interactive ChatHost) gets a
 // spawn_agent tool that builds a child agent at runtime and runs it under a
 // per-spawn timeout. Children below MaxDepth do not get the tool, so there
-// is no recursion by default. See docs/superpowers/specs/2026-07-23-spawn-agent-design.md.
+// is no recursion by default.
 type SpawnConfig struct {
 	Enabled        bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
 	MaxConcurrent  int  `mapstructure:"max_concurrent" yaml:"max_concurrent,omitempty"`   // run-global cap; default 4
@@ -160,7 +160,7 @@ func (a AgentChatConfig) EffectiveMaxTranscriptBytes() int {
 // same pattern as the chat-mode user_input tool. Knowledge is bi-temporal:
 // superseding or retiring hides an entry from default recall without
 // destroying it, and query/list accept as_of time travel. No external DB;
-// single binary. See docs/dev/PLAN-native-memory-kg.md.
+// single binary.
 type MemoryConfig struct {
 	Enabled bool   `mapstructure:"enabled" yaml:"enabled,omitempty"`
 	Dir     string `mapstructure:"dir" yaml:"dir,omitempty"` // default ~/.rakitsu/memory
@@ -1059,7 +1059,7 @@ func (c *Config) Validate() []*ValidationError {
 		}
 	}
 
-	// 8. B31: warn when a role:supervisor agent exists alongside a Hierarchical
+	// 8. Warn when a role:supervisor agent exists alongside a Hierarchical
 	// orchestrator. The Hierarchical strategy synthesizes its own supervisor
 	// (named after the orchestrator) in internal/agent/orchestrator.go:117-128
 	// and silently ignores user-declared role:supervisor agents. The user's
