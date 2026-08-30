@@ -1,4 +1,4 @@
-.PHONY: all build build-all frontend clean test install refresh-dogfood refresh-dogfood-dry
+.PHONY: all build build-all frontend clean test test-stress install refresh-dogfood refresh-dogfood-dry
 
 BINARY_NAME=rakitsu
 BUILD_DIR=bin
@@ -94,6 +94,12 @@ frontend-init:
 test:
 	go test -v ./...
 
+# Run the stress/load test harness (test/stress/) -- build-tagged out of the
+# default `go test ./...` run since these are longer-running concurrency and
+# load tests, not part of the regular suite.
+test-stress:
+	go test -tags stress -v ./test/stress/...
+
 # Run linter
 lint:
 	go vet ./...
@@ -173,6 +179,7 @@ help:
 	@echo "  embed-frontend Copy frontend dist to webui package"
 	@echo "  frontend-init  Initialize the Vue.js frontend project"
 	@echo "  test           Run tests"
+	@echo "  test-stress    Run the stress/load test harness (test/stress/)"
 	@echo "  lint           Run linter"
 	@echo "  install        Install binary to GOPATH/bin"
 	@echo "  clean          Clean build artifacts"

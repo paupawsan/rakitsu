@@ -406,6 +406,23 @@ func (s *SessionStore) DeleteSession(id string) error {
 
 	os.Remove(filepath.Join(s.dir, id+".checkpoint.json"))
 
+	// If the deleted session is still the active one (a still-running
+	// pipeline step, deleted out from under itself, before EndSession), drop
+	// the stale pointer now — otherwise a later WriteCheckpoint recreates the
+	// checkpoint file just removed above, and EndSession re-adds the session
+	// to the index via updateIndex's append-if-not-found fallback. Also
+	// close s.file here: WriteEvent only checks s.file == nil (not
+	// s.current), so leaving it open would keep appending events into the
+	// just-unlinked JSONL file, and EndSession's own close would never run
+	// since it returns early on s.current == nil.
+	if s.current != nil && s.current.ID == id {
+		s.current = nil
+		if s.file != nil {
+			s.file.Close()
+			s.file = nil
+		}
+	}
+
 	sessions, err := s.readIndex()
 	if err != nil {
 		return err

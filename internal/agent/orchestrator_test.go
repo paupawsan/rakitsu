@@ -540,3 +540,45 @@ func TestOrchestrator_SanitizedToolNameCollision_BothAgentsStayReachable(t *test
 		t.Errorf("buildSystemPrompt() doesn't mention both resolved tool names %q/%q:\n%s", nameA, nameB, prompt)
 	}
 }
+
+// TestOrchestrator_DisambiguationSuffixCanItselfCollide regression-guards a
+// second-order version of the bug above: resolvedToolNames' seen[base]
+// counter only tracks occurrences of the pre-disambiguation base string, so
+// a suffixed name (base_2) was never checked against the set of already-
+// assigned final names. "foo.bar" and "foo_bar" both sanitize to "foo_bar";
+// the second one gets disambiguated to "foo_bar_2" — which collides with a
+// third agent, "Foo Bar 2", whose own natural sanitized name is also
+// "foo_bar_2". All three pass config's exact-duplicate-name check
+// individually (their raw names are all distinct), so this must be caught
+// here or a delegation tool silently vanishes exactly like the base case.
+func TestOrchestrator_DisambiguationSuffixCanItselfCollide(t *testing.T) {
+	bus := telemetry.NewEventBus(64)
+	names := []string{"foo.bar", "foo_bar", "Foo Bar 2"}
+	agents := make(map[string]Runner, len(names))
+	for _, n := range names {
+		agents[n] = &salvageFakeAgent{name: n, answer: "ok"}
+	}
+
+	orch := &Orchestrator{
+		name:         "Supervisor",
+		strategy:     "Hierarchical",
+		systemPrompt: "base prompt",
+		agentNames:   names,
+		agents:       agents,
+		eventBus:     bus,
+	}
+
+	resolved := orch.resolvedToolNames()
+	seen := make(map[string]string, len(names))
+	for _, agentName := range names {
+		toolName := resolved[agentName]
+		if toolName == "" {
+			t.Fatalf("resolvedToolNames() missing an entry for %q: %+v", agentName, resolved)
+		}
+		if prior, exists := seen[toolName]; exists {
+			t.Fatalf("resolvedToolNames() gave %q and %q the same tool name %q — one is unreachable: %+v",
+				prior, agentName, toolName, resolved)
+		}
+		seen[toolName] = agentName
+	}
+}

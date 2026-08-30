@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/paupawsan/rakitsu/internal/llm"
 	"github.com/paupawsan/rakitsu/internal/llm/format"
@@ -84,6 +85,37 @@ func NewProvider(config *llm.ProviderConfig) *Provider {
 	}
 }
 
+// isReasoningModel reports whether model is one of OpenAI's reasoning-tier
+// families (o1/o3/o4/gpt-5), using the same prefix rules as go-openai's
+// own ReasoningValidator (reasoning_validator.go in that module). Those
+// models reject MaxTokens (must use MaxCompletionTokens instead) and any
+// Temperature/TopP other than 1 — the SDK enforces this client-side, before
+// the request ever reaches the network, so matching its detection here is
+// what keeps every reasoning-tier call from failing outright.
+func isReasoningModel(model string) bool {
+	for _, prefix := range []string{"o1", "o3", "o4", "gpt-5"} {
+		if strings.HasPrefix(model, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// setMaxTokens routes the token-limit onto whichever field the model
+// accepts: classic models take MaxTokens, reasoning-tier models require
+// MaxCompletionTokens (go-openai's ReasoningValidator rejects a non-zero
+// MaxTokens for those with ErrReasoningModelMaxTokensDeprecated).
+func setMaxTokens(req *openai.ChatCompletionRequest, model string, maxTokens int) {
+	if maxTokens <= 0 {
+		return
+	}
+	if isReasoningModel(model) {
+		req.MaxCompletionTokens = maxTokens
+	} else {
+		req.MaxTokens = maxTokens
+	}
+}
+
 // Generate sends a request to OpenAI and returns the response
 func (p *Provider) Generate(
 	ctx context.Context,
@@ -144,7 +176,12 @@ func (p *Provider) generate(
 		temperature = *override.Temperature
 		hasTempOverride = true
 	}
-	if hasTempOverride || temperature > 0 {
+	// Reasoning-tier models (o1/o3/o4/gpt-5) fix Temperature/TopP at 1 and
+	// reject any other value client-side (ErrReasoningModelLimitationsOther)
+	// — omitting a non-1 value lets the API default apply instead of failing
+	// the whole request.
+	reasoning := isReasoningModel(model)
+	if (hasTempOverride || temperature > 0) && (!reasoning || temperature == 1) {
 		req.Temperature = float32(temperature)
 	}
 
@@ -152,9 +189,7 @@ func (p *Provider) generate(
 	if override.MaxTokens != nil {
 		maxTokens = *override.MaxTokens
 	}
-	if maxTokens > 0 {
-		req.MaxTokens = maxTokens
-	}
+	setMaxTokens(&req, model, maxTokens)
 
 	topP := p.config.TopP
 	hasTopPOverride := false
@@ -162,7 +197,7 @@ func (p *Provider) generate(
 		topP = *override.TopP
 		hasTopPOverride = true
 	}
-	if hasTopPOverride || topP > 0 {
+	if (hasTopPOverride || topP > 0) && (!reasoning || topP == 1) {
 		req.TopP = float32(topP)
 	}
 
@@ -306,13 +341,14 @@ func (p *Provider) GenerateStream(
 			IncludeUsage: true,
 		},
 	}
-	if p.config.Temperature > 0 {
+	// See the matching comment in generate(): reasoning-tier models fix
+	// Temperature/TopP at 1 and require MaxCompletionTokens over MaxTokens.
+	reasoning := isReasoningModel(p.model)
+	if p.config.Temperature > 0 && (!reasoning || p.config.Temperature == 1) {
 		req.Temperature = float32(p.config.Temperature)
 	}
-	if p.config.MaxTokens > 0 {
-		req.MaxTokens = p.config.MaxTokens
-	}
-	if p.config.TopP > 0 {
+	setMaxTokens(&req, p.model, p.config.MaxTokens)
+	if p.config.TopP > 0 && (!reasoning || p.config.TopP == 1) {
 		req.TopP = float32(p.config.TopP)
 	}
 

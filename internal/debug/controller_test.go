@@ -437,3 +437,177 @@ func TestResume_DuplicateCallDoesNotPreArmTheNextPause(t *testing.T) {
 		cancel()
 	}
 }
+
+// TestContextCancel_DoesNotLeakStaleResumeToNextPause regression-guards a
+// race left open by the atomic-claim fix above: Resume() can claim a pause
+// (state -> StateRunning, lock released) and then, before its send to
+// resumeCh executes, lose the race to that pause's own context being
+// cancelled. Check()'s select then takes the ctx.Done() branch instead of
+// receiving, and Resume()'s later send lands in the buffered (capacity 1)
+// channel with no receiver — read back as a stale, pre-armed resume the
+// *next* time Check() pauses, silently skipping that fresh pause.
+//
+// Drives the exact interleaving deterministically instead of racing real
+// goroutines against a single-instruction window: performs Resume()'s claim
+// step directly (mirroring the locked portion TestResume_DuplicateCall...
+// above already regression-guards on its own), lets the real Check() exit
+// via real context cancellation, and only afterward performs the delayed
+// send exactly as a losing Resume() would — worst case for the fix, since
+// nothing is left to drain it before it lands in the buffer.
+func TestContextCancel_DoesNotLeakStaleResumeToNextPause(t *testing.T) {
+	bus := telemetry.NewEventBus(64)
+	dc := NewDebugController(bus)
+	dc.RequestPause()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- dc.Check(ctx, "pre_thought", "Worker", 0, nil)
+	}()
+	time.Sleep(20 * time.Millisecond) // let it reach the paused, blocking state
+
+	dc.mu.Lock()
+	if dc.state != StatePaused {
+		dc.mu.Unlock()
+		t.Fatal("expected StatePaused before the simulated claim")
+	}
+	dc.state = StateRunning
+	claimedSeq := dc.pauseSeq
+	dc.mu.Unlock()
+
+	// The claimed pause now loses the race: cancel its context and let
+	// Check() exit via ctx.Done() before the claimed action is sent.
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected Check() to return an error from context cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Check() never returned after context cancellation")
+	}
+
+	// The delayed send, exactly as Resume() would perform it after losing
+	// that race.
+	select {
+	case dc.resumeCh <- pendingResume{action: ActionResume, seq: claimedSeq}:
+	default:
+		t.Fatal("resumeCh unexpectedly full before the delayed send")
+	}
+
+	// A fresh, independent pause must genuinely block on its own Resume() —
+	// a leaked stale action would let it return immediately instead.
+	dc.RequestPause()
+	done2 := make(chan struct{})
+	go func() {
+		defer close(done2)
+		dc.Check(context.Background(), "pre_thought", "Worker", 1, nil)
+	}()
+
+	select {
+	case <-done2:
+		t.Fatal("second Check() returned without an explicit Resume() — the stale action leaked into a fresh pause")
+	case <-time.After(80 * time.Millisecond):
+		// Correct: still blocked, waiting for its own resume signal.
+	}
+
+	dc.Resume(ActionResume)
+	select {
+	case <-done2:
+	case <-time.After(time.Second):
+		t.Fatal("second Check() never returned after its own Resume")
+	}
+}
+
+// TestResume_DrainsStaleBufferedEntryInsteadOfDroppingItsOwnSend
+// regression-guards a second-order failure mode of the stale-resume-buffer
+// race: even after a stale entry lands in resumeCh (as in the test above),
+// a fully legitimate Resume() call for the *current* pause can still find
+// the buffer occupied — resumeCh has capacity 1, and nothing drains a stale
+// entry until the next pause's Check() loop happens to read it. Resume()
+// used to hit its `default:` branch in that case and silently drop its own
+// send, leaving the current pause with no way to ever be woken. Because
+// Resume() only reaches this point after exclusively claiming the current
+// pause (state != StatePaused for anyone racing in after), anything already
+// sitting in the buffer at that point is guaranteed stale, so Resume() can
+// safely drain it and retry its own send instead of giving up.
+func TestResume_DrainsStaleBufferedEntryInsteadOfDroppingItsOwnSend(t *testing.T) {
+	bus := telemetry.NewEventBus(64)
+	dc := NewDebugController(bus)
+
+	// Simulate a stale entry left behind by an earlier pause that raced its
+	// own ctx.Done() exit (same shape as the test above, without needing to
+	// actually reproduce the goroutine timing).
+	select {
+	case dc.resumeCh <- pendingResume{action: ActionResume, seq: 999}:
+	default:
+		t.Fatal("resumeCh unexpectedly full before the simulated stale send")
+	}
+
+	dc.mu.Lock()
+	dc.state = StatePaused
+	dc.pauseSeq = 5
+	dc.mu.Unlock()
+
+	dc.Resume(ActionStep)
+
+	select {
+	case pending := <-dc.resumeCh:
+		if pending.seq != 5 {
+			t.Fatalf("expected the legitimate seq=5 resume to have been sent (after draining the stale seq=999 entry), got seq=%d", pending.seq)
+		}
+		if pending.action != ActionStep {
+			t.Fatalf("expected action %v, got %v", ActionStep, pending.action)
+		}
+	default:
+		t.Fatal("Resume() dropped its own send instead of draining the stale entry first")
+	}
+}
+
+// TestSendResume_DoesNotClobberANewerPausesLegitimateMessage regression-
+// guards a race in the OTHER direction from the test above: the delayed
+// half of a Resume() call that claimed an EARLIER, now-superseded pause can
+// arrive at sendResume() after a brand-new pause has already started AND
+// received its own legitimate, not-yet-consumed Resume(). The occupant in
+// the buffer at that point is not stale — it's live. The original fix
+// (unconditionally draining whatever it found) would destroy that message
+// and hang the newer pause forever. sendResume() must only drain when its
+// own claimed seq still matches the current dc.pauseSeq; otherwise it has
+// been superseded and must abandon its send instead of touching the buffer.
+//
+// Drives the interleaving directly (same style as the test above) rather
+// than racing real goroutines: a live consumer would otherwise race the
+// delayed send to drain its own message first, making the clobber window
+// impossible to hit deterministically.
+func TestSendResume_DoesNotClobberANewerPausesLegitimateMessage(t *testing.T) {
+	bus := telemetry.NewEventBus(64)
+	dc := NewDebugController(bus)
+
+	// Pause 1 claimed a while ago (seq=1) but its send is delayed.
+	claimedSeq := uint64(1)
+
+	// A newer pause (seq=2) has since started and already received its own
+	// legitimate Resume() — its message is sitting in the buffer, unconsumed.
+	dc.mu.Lock()
+	dc.state = StatePaused
+	dc.pauseSeq = 2
+	dc.mu.Unlock()
+	select {
+	case dc.resumeCh <- pendingResume{action: ActionStep, seq: 2}:
+	default:
+		t.Fatal("resumeCh unexpectedly full before placing pause 2's legitimate message")
+	}
+
+	// Pause 1's delayed send finally runs.
+	dc.sendResume(pendingResume{action: ActionResume, seq: claimedSeq})
+
+	// Pause 2's legitimate message must still be there, untouched.
+	select {
+	case pending := <-dc.resumeCh:
+		if pending.seq != 2 || pending.action != ActionStep {
+			t.Fatalf("pause 2's legitimate message was clobbered by the superseded delayed send: got %+v", pending)
+		}
+	default:
+		t.Fatal("resumeCh unexpectedly empty — pause 2's message is gone")
+	}
+}

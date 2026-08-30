@@ -391,17 +391,17 @@ func (o *Orchestrator) getDelegationToolNames() []string {
 // agent silently vanishing with no error anywhere.
 func (o *Orchestrator) resolvedToolNames() map[string]string {
 	resolved := make(map[string]string, len(o.agentNames))
-	seen := make(map[string]int, len(o.agentNames))
+	assigned := make(map[string]bool, len(o.agentNames))
 	for _, agentName := range o.agentNames {
 		if _, exists := o.agents[agentName]; !exists {
 			continue
 		}
 		base := sanitizeToolName(agentName)
-		seen[base]++
 		name := base
-		if n := seen[base]; n > 1 {
+		for n := 2; assigned[name]; n++ {
 			name = fmt.Sprintf("%s_%d", base, n)
 		}
+		assigned[name] = true
 		resolved[agentName] = name
 	}
 	return resolved

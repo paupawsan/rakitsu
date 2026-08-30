@@ -485,34 +485,42 @@ func (t *Tool) maxOutputBytes() int {
 	return t.sandbox.ResourceLimits.MaxOutputBytes
 }
 
-// executeInDocker executes the command in a Docker container
-// This provides stronger isolation but requires Docker to be installed
-func (t *Tool) executeInDocker(ctx context.Context, cmd []string) (string, error) {
-	// Build docker run command
-	dockerCmd := []string{"docker", "run", "--rm"}
+// buildDockerArgs constructs the "docker run" argument list for cmd under
+// sandbox. Split out from executeInDocker so the hardening flags below are
+// unit-testable without actually invoking Docker.
+func buildDockerArgs(sandbox *config.SandboxConfig, cmd []string) []string {
+	dockerCmd := []string{"run", "--rm"}
+
+	// Root filesystem is read-only by default; only the explicit mounts below
+	// are writable. --tmpfs gives commands that need scratch space (compilers,
+	// package managers, etc.) somewhere to write without punching a hole in
+	// the read-only root. --security-opt=no-new-privileges blocks setuid/
+	// setgid privilege escalation inside the container.
+	dockerCmd = append(dockerCmd, "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m")
+	dockerCmd = append(dockerCmd, "--security-opt", "no-new-privileges")
 
 	// Add working directory mount
-	if t.sandbox.MountWorkdir {
+	if sandbox.MountWorkdir {
 		cwd, _ := os.Getwd()
 		dockerCmd = append(dockerCmd, "-v", cwd+":/workspace")
 		dockerCmd = append(dockerCmd, "-w", "/workspace")
 	}
 
 	// Add resource limits
-	if t.sandbox.ResourceLimits.CPULimit != "" {
-		dockerCmd = append(dockerCmd, "--cpus", t.sandbox.ResourceLimits.CPULimit)
+	if sandbox.ResourceLimits.CPULimit != "" {
+		dockerCmd = append(dockerCmd, "--cpus", sandbox.ResourceLimits.CPULimit)
 	}
-	if t.sandbox.ResourceLimits.MemoryLimit != "" {
-		dockerCmd = append(dockerCmd, "--memory", t.sandbox.ResourceLimits.MemoryLimit)
+	if sandbox.ResourceLimits.MemoryLimit != "" {
+		dockerCmd = append(dockerCmd, "--memory", sandbox.ResourceLimits.MemoryLimit)
 	}
 
 	// Network isolation
-	if t.sandbox.NetworkIsolated {
+	if sandbox.NetworkIsolated {
 		dockerCmd = append(dockerCmd, "--network", "none")
 	}
 
 	// Add image
-	image := t.sandbox.Image
+	image := sandbox.Image
 	if image == "" {
 		image = "alpine:latest"
 	}
@@ -520,12 +528,19 @@ func (t *Tool) executeInDocker(ctx context.Context, cmd []string) (string, error
 
 	// Add the actual command
 	dockerCmd = append(dockerCmd, cmd...)
+	return dockerCmd
+}
+
+// executeInDocker executes the command in a Docker container
+// This provides stronger isolation but requires Docker to be installed
+func (t *Tool) executeInDocker(ctx context.Context, cmd []string) (string, error) {
+	dockerArgs := buildDockerArgs(t.sandbox, cmd)
 
 	// Execute. Scrub sensitive env from the local `docker` CLI process itself;
 	// the container's own environment is separate and unaffected (docker run
 	// does not forward host env unless -e/--env-file is passed, which this
 	// command builder does not do).
-	execCmd := exec.CommandContext(ctx, dockerCmd[0], dockerCmd[1:]...)
+	execCmd := exec.CommandContext(ctx, "docker", dockerArgs...)
 	execCmd.Env = scrubbedEnviron()
 	output, err := execCmd.CombinedOutput()
 	if err != nil {
