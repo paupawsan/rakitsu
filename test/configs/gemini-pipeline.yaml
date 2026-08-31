@@ -1,0 +1,335 @@
+# Pipeline test using Gemini 3.1 Flash Lite Preview
+# Same shape as litellm-multi-agent.yaml, useful for isolating whether an
+# issue is provider-specific or a general pipeline/timeout problem.
+#
+# 5-agent pipeline: Architect → Developer → Code Review + Security → Testing
+# All agents use gemini-3.1-flash-lite-preview via Gemini API
+
+name: "Gemini Pipeline Dev Team"
+version: "1.0.0"
+description: "5-agent pipeline using Gemini 3.1 Flash Lite to test pipeline strategy"
+
+settings:
+  default_provider: "gemini"
+  api_keys:
+    gemini: "${GEMINI_API_KEY}"
+  credentials_files:
+    gemini: "${GOOGLE_APPLICATION_CREDENTIALS:-test/configs/gemini-keys/service-account.json}"
+  allowed_commands:
+    - "python3"
+    - "pytest"
+    - "tree"
+  defaults:
+    model: "gemini-3.1-flash-lite-preview"
+    temperature: 0.5
+    max_tokens: 4096
+
+tools:
+  # --- File System Tools ---
+  - name: "read_file"
+    type: "fs"
+    description: "Read the contents of a file. Returns the full file content as text."
+    operation: "read"
+    allowed_paths:
+      - "./test/workspace/"
+    parameters:
+      path:
+        type: "string"
+        description: "Path to the file to read (e.g., './test/workspace/app.py')"
+        required: true
+
+  - name: "write_file"
+    type: "fs"
+    description: "Write content to a file. Creates the file if it doesn't exist, overwrites if it does."
+    operation: "write"
+    allowed_paths:
+      - "./test/workspace/"
+    parameters:
+      path:
+        type: "string"
+        description: "Path to write the file to (e.g., './test/workspace/calculator.py')"
+        required: true
+      content:
+        type: "string"
+        description: "The full content to write to the file"
+        required: true
+
+  - name: "list_files"
+    type: "fs"
+    description: "List files and directories in a path"
+    operation: "list"
+    allowed_paths:
+      - "./test/workspace/"
+    parameters:
+      path:
+        type: "string"
+        description: "Directory path to list (e.g., './test/workspace/')"
+        required: true
+
+  - name: "search_files"
+    type: "fs"
+    description: "Search for a text pattern across files in a directory"
+    operation: "search"
+    allowed_paths:
+      - "./test/workspace/"
+    parameters:
+      path:
+        type: "string"
+        description: "Base directory path to search in"
+        required: true
+      pattern:
+        type: "string"
+        description: "Text pattern to search for in file contents"
+        required: true
+
+  # --- CLI Tools ---
+  - name: "run_python"
+    type: "cli"
+    description: "Execute a Python3 script and return stdout/stderr output"
+    command: "python3"
+    sandbox:
+      type: "local_restricted"
+      allowed_paths:
+        - "./test/workspace/"
+      resource_limits:
+        timeout_sec: 30
+
+  - name: "run_tests"
+    type: "cli"
+    description: "Run pytest on test files in the workspace"
+    command: "python3 -m pytest -v"
+    sandbox:
+      type: "local_restricted"
+      allowed_paths:
+        - "./test/workspace/"
+      resource_limits:
+        timeout_sec: 60
+
+  - name: "show_tree"
+    type: "cli"
+    description: "Show directory tree structure"
+    command: "tree -L 3"
+    sandbox:
+      type: "local_restricted"
+      allowed_paths:
+        - "./test/workspace/"
+      resource_limits:
+        timeout_sec: 10
+
+skills:
+  - name: "code_generation"
+    description: "Generate production-quality code with proper error handling, types, and docstrings"
+    tools:
+      - "write_file"
+      - "read_file"
+    prompt_template: |
+      Write production-quality code following these standards:
+      1. Proper error handling with specific exception types
+      2. Type hints on all function signatures
+      3. Docstrings on all public functions/classes
+      4. Input validation at public API boundaries
+      5. Follow SOLID principles and clean code practices
+
+  - name: "code_review"
+    description: "Thorough code review for bugs, style, and improvements"
+    tools:
+      - "read_file"
+      - "search_files"
+    prompt_template: |
+      Perform a thorough code review. For each finding provide:
+      1. File and line number
+      2. Severity: critical / high / medium / low
+      3. Category: bug, security, performance, style, maintainability
+      4. Description of the issue
+      5. Suggested fix with code example
+
+  - name: "security_audit"
+    description: "Security vulnerability assessment"
+    tools:
+      - "read_file"
+      - "search_files"
+    prompt_template: |
+      Perform a security audit. Check for:
+      1. Injection vulnerabilities (SQL, command, path traversal)
+      2. Input validation gaps
+      3. Authentication/authorization issues
+      4. Data exposure risks
+      5. Insecure defaults or configurations
+      Rate each finding by OWASP category and severity.
+
+agents:
+  - name: "Architect"
+    role: "worker"
+    provider: "gemini"
+    model: "gemini-3.1-flash-lite-preview"
+    system_prompt: |
+      You are a senior software architect. Your responsibilities:
+      - Analyze requirements and design modular, extensible solutions
+      - Define class hierarchies, interfaces, and data models
+      - Specify file structure and module boundaries
+      - Choose appropriate design patterns
+      - Consider edge cases, error handling strategy, and testability
+
+      Use tools to read existing code and understand the codebase context.
+
+      Output a detailed technical design document including:
+      - Module/file structure with exact filenames
+      - Class/function signatures with types
+      - Error handling strategy
+      - Test strategy outline
+    tools:
+      - "read_file"
+      - "list_files"
+      - "show_tree"
+    settings:
+      max_iterations: 6
+      reflection:
+        enabled: true
+        mode: "before_answer"
+        frequency: "always"
+
+  - name: "Developer"
+    role: "worker"
+    provider: "gemini"
+    model: "gemini-3.1-flash-lite-preview"
+    system_prompt: |
+      You are a senior Python developer. Your responsibilities:
+      - Implement code based on architectural specifications
+      - Write clean, well-documented, production-quality code
+      - Include comprehensive type hints and docstrings
+      - Handle errors gracefully with specific exception types
+      - Write modular, testable code
+
+      IMPORTANT: Always use write_file to save your code to files.
+      Never just describe code — write it to actual files.
+      Read existing files first to understand context before writing.
+    tools:
+      - "read_file"
+      - "write_file"
+      - "list_files"
+      - "search_files"
+    skills:
+      - "code_generation"
+    settings:
+      max_iterations: 12
+      reflection:
+        enabled: true
+        mode: "after_tool"
+        frequency: "on_error"
+
+  - name: "Code Reviewer"
+    role: "worker"
+    provider: "gemini"
+    model: "gemini-3.1-flash-lite-preview"
+    system_prompt: |
+      You are a senior code reviewer with expertise in Python. Your job:
+      - Read ALL source files in the project
+      - Identify bugs, logic errors, and edge cases
+      - Check error handling completeness
+      - Evaluate code organization and modularity
+      - Verify type hints are correct and complete
+      - Check for code duplication
+
+      For each finding, cite the exact file and line, explain the impact,
+      and provide a concrete fix. Rate severity: critical/high/medium/low.
+    tools:
+      - "read_file"
+      - "search_files"
+      - "list_files"
+    skills:
+      - "code_review"
+    settings:
+      max_iterations: 8
+      reflection:
+        enabled: true
+        mode: "after_tool"
+        frequency: "on_error"
+
+  - name: "Security Auditor"
+    role: "worker"
+    provider: "gemini"
+    model: "gemini-3.1-flash-lite-preview"
+    system_prompt: |
+      You are an application security engineer. Your responsibilities:
+      - Audit code for OWASP Top 10 vulnerabilities
+      - Check for injection flaws (SQL, command, path traversal)
+      - Verify input validation and sanitization
+      - Assess error messages for information leakage
+      - Review for insecure defaults
+
+      For each vulnerability, provide:
+      - OWASP category and severity rating
+      - Attack scenario description
+      - Remediation with code example
+    tools:
+      - "read_file"
+      - "search_files"
+    skills:
+      - "security_audit"
+    settings:
+      max_iterations: 6
+
+  - name: "Test Engineer"
+    role: "worker"
+    provider: "gemini"
+    model: "gemini-3.1-flash-lite-preview"
+    system_prompt: |
+      You are a QA engineer specializing in Python testing. Your workflow:
+      1. Read the source files to understand what needs testing
+      2. Write comprehensive pytest test suites using write_file
+      3. Run the tests using run_tests
+      4. Report pass/fail results with details
+
+      Test coverage should include:
+      - Happy path for all public methods
+      - Edge cases and boundary values
+      - Error conditions and exception handling
+      - Type validation
+
+      Name test files as test_*.py in the same directory as source.
+    tools:
+      - "read_file"
+      - "write_file"
+      - "list_files"
+      - "run_tests"
+      - "run_python"
+    settings:
+      max_iterations: 10
+      reflection:
+        enabled: true
+        mode: "after_tool"
+        frequency: "on_error"
+
+# Orchestrator — Pipeline strategy (deterministic sequential/parallel/loop)
+orchestrator:
+  name: "Tech Lead"
+  strategy: "Pipeline"
+  agents:
+    - "Architect"
+    - "Developer"
+    - "Code Reviewer"
+    - "Security Auditor"
+    - "Test Engineer"
+  pipeline:
+    steps:
+      - name: "design"
+        agent: "Architect"
+        task: "Analyze the requirements and design a modular solution. All files MUST be placed under ./test/workspace/ directory. Define the file structure, class hierarchy, function signatures with types, error handling strategy, and test strategy."
+
+      - name: "implement"
+        agent: "Developer"
+        task: "Implement the solution based on the architecture design. ALL files MUST be written under ./test/workspace/ (e.g., ./test/workspace/calculator.py). Use write_file to save each file. Do NOT create subdirectories — put all .py files directly in ./test/workspace/."
+
+      - name: "review"
+        type: "parallel"
+        steps:
+          - name: "code_review"
+            agent: "Code Reviewer"
+            task: "Review all implemented code in ./test/workspace/ for bugs, logic errors, edge cases, code quality, and type hint completeness. Use list_files on ./test/workspace/ first. Cite exact files and provide severity ratings."
+          - name: "security_audit"
+            agent: "Security Auditor"
+            task: "Audit all implemented code in ./test/workspace/ for security vulnerabilities. Check for injection flaws, input validation gaps, and insecure defaults. Rate by OWASP category."
+
+      - name: "test"
+        agent: "Test Engineer"
+        task: "Write pytest test suites for the code in ./test/workspace/. Save test files as ./test/workspace/test_*.py. Run the tests using run_tests and report results. ALL paths must start with ./test/workspace/."

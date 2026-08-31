@@ -1,0 +1,89 @@
+# 09 — Memory Chat (native memory/KG + summarized-context conversation)
+#
+# Demonstrates rakitsu's single-binary memory system:
+#
+#   1. settings.memory.enabled gives the agent six tools —
+#      memory_add / memory_query / memory_get / memory_list / memory_link /
+#      memory_retire — backed by JSON files under ~/.rakitsu/memory/ (no
+#      external DB). Knowledge persists across runs; project_id scopes it.
+#      Knowledge changes are superseded (memory_add with supersedes=<old-id>)
+#      or retired (memory_retire), never destroyed — old entries hide from
+#      recall but stay queryable with as_of / include_expired.
+#   2. settings.memory.conversation switches chat turns from full-history
+#      re-feed to: rolling summary + last keep_recent_turns turns verbatim.
+#      Per-turn context stays bounded no matter how long the chat runs —
+#      built for small-context local models (e.g. 16K nemotron).
+#
+# Usage (interactive chat):
+#   rakitsu run examples/single/09-memory-chat/config.yaml -i
+#
+# Try: tell it facts in early turns ("my project is called X, the deploy
+# target is Y"), chat past keep_recent_turns, then ask it to recall — the
+# answer comes from the rolling summary / memory store, not the transcript.
+# Watch MEMORY_WRITE / MEMORY_RECALL events with --trace or in the inspector.
+
+name: Memory Chat
+version: "1.0"
+description: Conversational assistant with native persistent memory and summarized context.
+project_id: memory-chat-demo
+interactive: true
+
+settings:
+  # Memory discipline (memory_add/memory_query calls at the right moments)
+  # works best with a strong tool-calling model, so this example defaults to
+  # a cloud provider. For a keyless local run, switch to the ollama block
+  # below — expect weaker recall behavior from small models.
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+    # Alternatives — uncomment one and set default_provider above:
+    # anthropic:
+    #   type: anthropic
+    #   api_key: ${ANTHROPIC_API_KEY}
+    # ollama:
+    #   type: ollama
+    #   base_url: http://localhost:11434/v1
+    # litellm:
+    #   type: litellm
+    #   api_key: ${LITELLM_API_KEY:-not-needed}
+    #   base_url: ${LITELLM_BASE_URL:-http://localhost:4000}
+  defaults:
+    model: gpt-4o-mini
+    temperature: 0.7
+    max_tokens: 2048
+  memory:
+    enabled: true
+    # dir: ~/.rakitsu/memory   # default
+    conversation:
+      enabled: true
+      keep_recent_turns: 2
+      summary_max_chars: 2000
+    # auto_recall injects the top-k memories relevant to each turn's question
+    # into the model's context at the start of the turn, so facts surface even
+    # when a weak model never thinks to call memory_query. The ranked index is
+    # added as a fenced <recalled_memory> block; full bodies are still fetched
+    # on demand with memory_get. Especially useful in disable_summary mode.
+    auto_recall:
+      enabled: true
+      top_k: 5
+      # node_type: fact                     # optional: restrict to one type
+      # scopes: [session, project, global]  # optional cascade override
+
+agents:
+  - name: Assistant
+    role: worker
+    system_prompt: |
+      You are a helpful assistant with persistent memory.
+
+      Memory discipline:
+      - Before answering anything non-trivial, call memory_query to check
+        what you already know.
+      - When the user tells you a durable fact, preference, decision, or
+        gotcha, call memory_add to persist it (type: fact/rule/gotcha/...,
+        compact content). Re-use the same id to update an entry.
+      - Link related entries with memory_link.
+
+      Answer clearly and concisely. If you don't know something and memory
+      has nothing, say so honestly.

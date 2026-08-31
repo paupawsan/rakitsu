@@ -1,0 +1,17 @@
+name: run_command
+type: cli
+description: Execute a diagnostic command
+# SECURITY NOTE: sh/bash are on rakitsu's system command whitelist, so this
+# runs whatever shell syntax the agent produces — it's a footgun fence, not
+# a sandbox boundary. Rakitsu trusts its own config; don't treat this as
+# isolation from a malicious or compromised agent.
+command: "sh -c '{{command}}'"
+parameters:
+  command:
+    type: string
+    description: Shell command
+    required: true
+sandbox:
+  type: local_restricted
+  resource_limits:
+    timeout_sec: 30

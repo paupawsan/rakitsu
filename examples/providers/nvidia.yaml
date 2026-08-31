@@ -1,0 +1,41 @@
+# Provider Reference: NVIDIA NIM (integrate.api.nvidia.com)
+#
+# NVIDIA's hosted inference API is OpenAI-compatible — uses the existing
+# `type: openai` provider with a base_url override. No new provider type.
+#
+# Free tier is available at https://build.nvidia.com — click "Get API Key"
+# on a specific model page (e.g. deepseek-v4-flash) to get an inference-scope
+# key. A "Personal Key" from the home page may only grant /v1/models access
+# and return 403 on /chat/completions.
+#
+# Verified catalog (2026-04-25):
+#   deepseek-ai/deepseek-v4-flash       (reasoning, low-latency, recommended baseline)
+#   deepseek-ai/deepseek-v4-pro         (reasoning, high-quality)
+#   deepseek-ai/deepseek-v3.2
+#   meta/llama-3.3-70b-instruct
+#   nvidia/llama-3.3-nemotron-super-49b-v1.5
+#
+# Not yet supported in rakitsu: extra_body.chat_template_kwargs.thinking,
+# reasoning_effort. Runs at default reasoning effort; `reasoning` field
+# returns null. See project memory project_nvidia_nim_provider for scope.
+
+name: NVIDIA NIM Example
+version: "1.0"
+
+settings:
+  default_provider: nvidia
+  providers:
+    nvidia:
+      type: openai
+      base_url: https://integrate.api.nvidia.com/v1
+      api_key: ${NVIDIA_API_KEY}
+      default_model: deepseek-ai/deepseek-v4-flash
+  defaults:
+    model: deepseek-ai/deepseek-v4-flash
+    temperature: 0.7
+    max_tokens: 4096
+
+agents:
+  - name: Assistant
+    role: worker
+    system_prompt: You are a helpful assistant powered by NVIDIA NIM.

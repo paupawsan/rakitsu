@@ -1,0 +1,61 @@
+name: stress-multi-agent
+version: "1.0"
+description: 5-agent orchestrator with mock provider for stress testing
+
+settings:
+  default_provider: mock
+  defaults:
+    model: mock-model
+    temperature: 0.7
+    max_tokens: 1024
+  execution:
+    max_iterations: 10
+    timeout_seconds: 120
+
+tools:
+  - name: echo
+    type: cli
+    description: Echo tool
+    command: echo
+    allowed_args: ["*"]
+
+agents:
+  - name: supervisor
+    role: supervisor
+    provider: mock
+    model: mock-model
+    system_prompt: "You are a supervisor coordinating workers."
+    tools: [echo]
+
+  - name: analyst
+    role: worker
+    provider: mock
+    model: mock-model
+    system_prompt: "You are an analyst."
+    tools: [echo]
+
+  - name: coder
+    role: worker
+    provider: mock
+    model: mock-model
+    system_prompt: "You are a coder."
+    tools: [echo]
+
+  - name: reviewer
+    role: worker
+    provider: mock
+    model: mock-model
+    system_prompt: "You are a reviewer."
+    tools: [echo]
+
+  - name: tester
+    role: worker
+    provider: mock
+    model: mock-model
+    system_prompt: "You are a tester."
+    tools: [echo]
+
+orchestrator:
+  strategy: ReAct
+  supervisor: supervisor
+  workers: [analyst, coder, reviewer, tester]

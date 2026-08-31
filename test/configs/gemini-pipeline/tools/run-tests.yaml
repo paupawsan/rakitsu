@@ -1,0 +1,10 @@
+name: "run_tests"
+type: "cli"
+description: "Run pytest on test files in the workspace"
+command: "python3 -m pytest -v"
+sandbox:
+  type: "local_restricted"
+  allowed_paths:
+    - "./test/workspace/"
+  resource_limits:
+    timeout_sec: 60

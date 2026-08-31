@@ -94,15 +94,29 @@ type RerunRequest struct {
 	Overrides map[string]interface{}
 }
 
+// pendingResume is what Resume() actually sends on resumeCh. seq ties the
+// action to the specific pause it was claimed for (DebugController.pauseSeq
+// at claim time) — see the comment on Resume() for why this is needed.
+type pendingResume struct {
+	action ResumeAction
+	seq    uint64
+}
+
 // DebugController coordinates breakpoints, pause/resume, and parameter overrides.
 type DebugController struct {
 	mu          sync.RWMutex
 	breakpoints map[BreakpointKey]bool
 	overrides   map[string]*ParamOverride // agent name → override
 	state       DebugState
-	resumeCh    chan ResumeAction
+	resumeCh    chan pendingResume
 	rerunCh     chan RerunRequest
 	eventBus    *telemetry.EventBus
+
+	// pauseSeq identifies the current pause instance, incremented every time
+	// Check() transitions into StatePaused. Lets Check() tell a resume meant
+	// for ITS pause apart from a stale one claimed for an earlier pause that
+	// already ended via context cancellation — see Resume()'s doc comment.
+	pauseSeq uint64
 
 	// Step In: pause at first checkpoint inside this agent
 	stepIntoAgent string
@@ -118,7 +132,7 @@ func NewDebugController(eventBus *telemetry.EventBus) *DebugController {
 		breakpoints: make(map[BreakpointKey]bool),
 		overrides:   make(map[string]*ParamOverride),
 		state:       StateRunning,
-		resumeCh:    make(chan ResumeAction, 1),
+		resumeCh:    make(chan pendingResume, 1),
 		rerunCh:     make(chan RerunRequest, 1),
 		eventBus:    eventBus,
 	}
@@ -190,9 +204,13 @@ func (dc *DebugController) Check(ctx context.Context, checkpoint string, agentNa
 		return nil
 	}
 
-	// Transition to paused — clear one-shot state
+	// Transition to paused — clear one-shot state. pauseSeq identifies this
+	// specific pause instance; see the resumeCh receive loop below and
+	// Resume()'s doc comment for why.
 	dc.mu.Lock()
 	dc.state = StatePaused
+	dc.pauseSeq++
+	mySeq := dc.pauseSeq
 	dc.stepIntoAgent = ""
 	dc.stepOutAgent = ""
 	dc.runUntilCond = nil
@@ -218,46 +236,56 @@ func (dc *DebugController) Check(ctx context.Context, checkpoint string, agentNa
 	}
 	dc.eventBus.Emit(agentName, telemetry.EventDebugPaused, payload)
 
-	// Block until resume signal or context cancellation
-	select {
-	case action := <-dc.resumeCh:
-		dc.mu.Lock()
-		switch action {
-		case ActionStep:
-			dc.state = StateStepping
-		case ActionStepIn:
-			// Pause at first checkpoint inside the next delegated agent
-			dc.stepIntoAgent = agentName // track who initiated; Check sees child agents
-			dc.state = StateRunning
-		case ActionStepOut:
-			// Resume until we leave current agent scope
-			dc.stepOutAgent = agentName
-			dc.state = StateRunning
-		case ActionRunUntil:
-			// runUntilCond must be set via SetRunUntilCondition before resume
-			dc.state = StateRunning
-		case ActionStop:
+	// Block until a resume signal for THIS pause, or context cancellation. A
+	// pending message with a mismatched seq is a stale one — claimed by a
+	// Resume() call for an earlier pause that already exited via ctx.Done()
+	// below before the send landed (see Resume()'s doc comment) — discard it
+	// and keep waiting instead of treating it as this pause's resume.
+	for {
+		select {
+		case pending := <-dc.resumeCh:
+			if pending.seq != mySeq {
+				continue
+			}
+			action := pending.action
+			dc.mu.Lock()
+			switch action {
+			case ActionStep:
+				dc.state = StateStepping
+			case ActionStepIn:
+				// Pause at first checkpoint inside the next delegated agent
+				dc.stepIntoAgent = agentName // track who initiated; Check sees child agents
+				dc.state = StateRunning
+			case ActionStepOut:
+				// Resume until we leave current agent scope
+				dc.stepOutAgent = agentName
+				dc.state = StateRunning
+			case ActionRunUntil:
+				// runUntilCond must be set via SetRunUntilCondition before resume
+				dc.state = StateRunning
+			case ActionStop:
+				dc.state = StateRunning
+				dc.mu.Unlock()
+				dc.eventBus.Emit(agentName, telemetry.EventDebugResumed, telemetry.DebugResumedPayload{
+					Action: string(ActionStop),
+				})
+				return fmt.Errorf("execution stopped by debugger: %w", context.Canceled)
+			default:
+				dc.state = StateRunning
+			}
+			dc.mu.Unlock()
+
+			dc.eventBus.Emit(agentName, telemetry.EventDebugResumed, telemetry.DebugResumedPayload{
+				Action: string(action),
+			})
+			return nil
+
+		case <-ctx.Done():
+			dc.mu.Lock()
 			dc.state = StateRunning
 			dc.mu.Unlock()
-			dc.eventBus.Emit(agentName, telemetry.EventDebugResumed, telemetry.DebugResumedPayload{
-				Action: string(ActionStop),
-			})
-			return fmt.Errorf("execution stopped by debugger: %w", context.Canceled)
-		default:
-			dc.state = StateRunning
+			return ctx.Err()
 		}
-		dc.mu.Unlock()
-
-		dc.eventBus.Emit(agentName, telemetry.EventDebugResumed, telemetry.DebugResumedPayload{
-			Action: string(action),
-		})
-		return nil
-
-	case <-ctx.Done():
-		dc.mu.Lock()
-		dc.state = StateRunning
-		dc.mu.Unlock()
-		return ctx.Err()
 	}
 }
 
@@ -286,6 +314,20 @@ func (dc *DebugController) Check(ctx context.Context, checkpoint string, agentNa
 // enough to block a second claim, so StateRunning is a fine placeholder for
 // every action including ActionStep, overwritten within a lock-hold of
 // Check() consuming it.
+//
+// A second, independent race remains even with that claim exclusive: this
+// function's own send to resumeCh happens outside dc.mu (a channel send
+// can't be made atomic with the claim above without risking a blocking send
+// while holding the lock), so Check() can lose the race against its own
+// ctx.Done() — cancelled after this claim but before the send below lands —
+// and return without ever receiving. The send would then still succeed into
+// the buffer (nothing requires a waiting receiver) and sit there for
+// whichever pause comes next. Tagging the send with the exact pauseSeq
+// captured under the claim lock, rather than trying to close that timing
+// window directly, is what actually fixes it: Check()'s receive loop above
+// only honors a message whose seq matches the pause it's currently in, so a
+// send that arrives after its own pause already exited is simply discarded
+// by the *next* pause instead of being mistaken for that pause's resume.
 func (dc *DebugController) Resume(action ResumeAction) {
 	dc.mu.Lock()
 	if dc.state != StatePaused {
@@ -293,14 +335,59 @@ func (dc *DebugController) Resume(action ResumeAction) {
 		return
 	}
 	dc.state = StateRunning
+	seq := dc.pauseSeq
 	dc.mu.Unlock()
 
+	dc.sendResume(pendingResume{action: action, seq: seq})
+}
+
+// sendResume performs Resume()'s buffered send, given the seq claimed under
+// dc.mu. Split out from Resume() so the delayed-send half of that function's
+// own race (see its doc comment) can be driven deterministically in tests.
+func (dc *DebugController) sendResume(pending pendingResume) {
 	select {
-	case dc.resumeCh <- action:
+	case dc.resumeCh <- pending:
+		return
 	default:
-		// Another send is already buffered — shouldn't happen under normal
-		// operation now that the claim above is exclusive per pause, but
-		// kept as a defensive fallback rather than blocking forever.
+	}
+
+	// The buffer's one slot is already occupied. A first version of this
+	// fix assumed the occupant must be a stale entry left behind by an
+	// earlier pause (nothing else can be mid-send for THIS seq, since the
+	// claim in Resume() is exclusive per pause) and unconditionally drained
+	// it — but "exclusive per pause" only rules out another sender for
+	// *this* seq, not a legitimate, not-yet-consumed message belonging to a
+	// *later* pause. This call can itself be the delayed half of an earlier
+	// Resume() — claimed, then stalled past its own pause's ctx.Done() exit
+	// — arriving here after a brand-new pause has already started AND
+	// received its own valid Resume(). Draining unconditionally in that
+	// case would destroy that live message and hang the newer pause
+	// forever, which is strictly worse than just dropping this stale send.
+	//
+	// dc.pauseSeq only ever increases, and only increases when a new pause
+	// begins — so if it still equals the seq this call claimed, no newer
+	// pause has started, and anything already in the buffer really is
+	// stale (safe to drain and retry). If it has moved on, this call's own
+	// pause has been superseded; abandon rather than risk clobbering
+	// whatever the current pause is waiting on.
+	dc.mu.Lock()
+	current := dc.pauseSeq
+	dc.mu.Unlock()
+	if current != pending.seq {
+		return
+	}
+
+	select {
+	case <-dc.resumeCh:
+	default:
+	}
+	select {
+	case dc.resumeCh <- pending:
+	default:
+		// Lost a second race for the slot (extremely unlikely: would need
+		// another stale send to land in the single-item window between the
+		// drain and this send). Nothing further to do without risking a
+		// blocking send here.
 	}
 }
 

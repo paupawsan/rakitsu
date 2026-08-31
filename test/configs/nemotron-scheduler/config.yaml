@@ -1,0 +1,96 @@
+# Nemotron Dev Team — Generic (LiteLLM)
+#
+# A general-purpose multi-agent dev team powered by Nemotron + Qwen via LiteLLM proxy.
+# Works on ANY coding task — just like Claude Code.
+#
+# Pipeline: Planner -> Developer -> Verifier -> Reviewer + Security (parallel)
+#
+# Usage:
+#   source .env
+#   rakitsu serve &
+#   rakitsu run test/configs/nemotron-scheduler/config.yaml "Build a Go task scheduler web app in ./test/workspace/go-scheduler/. REST API with POST/GET/DELETE /tasks. Each task has a name, interval seconds, and shell command. Background goroutine runs due tasks. In-memory store. Port 8090. Standard library only." --trace --timeout 1800
+#
+# Or any other task:
+#   rakitsu run test/configs/nemotron-scheduler/config.yaml "Add unit tests to ./test/workspace/go-scheduler/" --trace --timeout 1800
+#   rakitsu run test/configs/nemotron-scheduler/config.yaml "Build a Python FastAPI todo app in ./test/workspace/todo-api/" --trace --timeout 1800
+
+name: "Nemotron Dev Team"
+version: "2.0.0"
+description: "Generic dev pipeline powered by Nemotron + Qwen via LiteLLM — works on any coding task"
+
+settings:
+  default_provider: "litellm"
+
+  providers:
+    litellm:
+      type: "openai"
+      api_key: "${LITELLM_API_KEY}"
+      base_url: "${LITELLM_BASE_URL}"
+
+  # SECURITY NOTE: sh/bash/curl below are on rakitsu's system command
+  # whitelist regardless of this list, so this allowlist is a footgun
+  # fence, not a sandbox boundary — a tool using run_command still runs
+  # whatever shell syntax the agent produces. Rakitsu trusts its own
+  # config; don't treat this as isolation from a malicious or compromised
+  # agent.
+  allowed_commands:
+    - "go"
+    - "python3"
+    - "pip"
+    - "node"
+    - "npm"
+    - "npx"
+    - "cargo"
+    - "make"
+    - "git"
+    - "ls"
+    - "cat"
+    - "head"
+    - "tail"
+    - "find"
+    - "grep"
+    - "wc"
+    - "tree"
+    - "diff"
+    - "sh"
+    - "bash"
+    - "mkdir"
+    - "curl"
+
+  defaults:
+    model: "your-model-alias"
+    temperature: 0.3
+    max_tokens: 4096
+
+orchestrator:
+  name: "Lead"
+  strategy: "Pipeline"
+  provider: "litellm"
+  model: "your-model-alias"
+  agents:
+    - "Planner"
+    - "Developer"
+    - "Verifier"
+    - "Reviewer"
+    - "Security"
+  pipeline:
+    steps:
+      - name: "plan"
+        agent: "Planner"
+        # Uses CLI query — explore, analyze, write PLAN.md
+
+      - name: "implement"
+        agent: "Developer"
+        # Reads plan from previous step, writes all files using write_file tool
+
+      - name: "verify"
+        agent: "Verifier"
+        # Builds, runs tests, checks implementation
+
+      - name: "review"
+        type: "parallel"
+        steps:
+          - name: "code_review"
+            agent: "Reviewer"
+          - name: "security_check"
+            agent: "Security"

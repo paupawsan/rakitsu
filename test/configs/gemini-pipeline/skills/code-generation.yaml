@@ -1,0 +1,12 @@
+name: "code_generation"
+description: "Generate production-quality code with proper error handling, types, and docstrings"
+tools:
+  - "write_file"
+  - "read_file"
+prompt_template: |
+  Write production-quality code following these standards:
+  1. Proper error handling with specific exception types
+  2. Type hints on all function signatures
+  3. Docstrings on all public functions/classes
+  4. Input validation at public API boundaries
+  5. Follow SOLID principles and clean code practices

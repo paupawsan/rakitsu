@@ -1,0 +1,126 @@
+# 05 — Dev Team Pipeline (Single File)
+#
+# Plan → Implement → Verify → Review pipeline.
+# See modular/05-dev-team/ for the same config split into agents/ and tools/ dirs.
+#
+# Usage:
+#   rakitsu run examples/single/05-dev-team/config.yaml "Add input validation to the user registration endpoint"
+
+name: Dev Team
+version: "1.0"
+description: General-purpose dev pipeline — plan, implement, verify, review.
+
+settings:
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+  defaults:
+    model: gpt-4o-mini
+    temperature: 0.3
+    max_tokens: 8192
+  execution:
+    max_iterations: 5
+    timeout_seconds: 600
+  allowed_commands:
+    - go
+    - python3
+    - node
+    - npm
+    - make
+    - git
+    - find
+    - grep
+    - cat
+    - ls
+
+tools:
+  - name: read-file
+    type: fs
+    operation: read
+    allowed_paths:
+      - "."
+    description: Read source file contents
+    parameters:
+      path: { type: string, description: "File path to read", required: true }
+
+  - name: write-file
+    type: fs
+    operation: write
+    allowed_paths:
+      - "."
+    description: Write or create a source file
+    parameters:
+      path: { type: string, description: "File path to write", required: true }
+      content: { type: string, description: "File content", required: true }
+
+  - name: run-command
+    type: cli
+    description: Execute a shell command (restricted to allowed_commands)
+    # SECURITY NOTE: sh/bash are on rakitsu's system command whitelist, so
+    # allowed_commands is a footgun fence, not a sandbox boundary — this
+    # runs whatever shell syntax the agent produces. Rakitsu trusts its own
+    # config; don't treat this as isolation from a malicious or compromised
+    # agent.
+    command: "sh -c '{{command}}'"
+    parameters:
+      command: { type: string, description: "Shell command to execute", required: true }
+    sandbox:
+      type: local_restricted
+      resource_limits:
+        timeout_sec: 30
+
+agents:
+  - name: Planner
+    role: worker
+    system_prompt: |
+      You are a technical planner. Analyze the request, explore the existing codebase,
+      and create a clear step-by-step implementation plan.
+    tools: [read-file, run-command]
+    settings: { max_iterations: 3 }
+
+  - name: Developer
+    role: worker
+    system_prompt: |
+      You are a software developer. Implement the plan by reading existing code,
+      making changes, and writing new files. Follow existing conventions.
+    tools: [read-file, write-file, run-command]
+    settings: { max_iterations: 5 }
+
+  - name: Verifier
+    role: worker
+    system_prompt: |
+      You are a QA engineer. Verify the implementation by reading changed files
+      and running tests. Report any failures or concerns.
+    tools: [read-file, run-command]
+    settings: { max_iterations: 4 }
+
+  - name: Reviewer
+    role: worker
+    system_prompt: |
+      You are a senior code reviewer. Review for quality, security, and conventions.
+      Verdict: APPROVE, REQUEST_CHANGES, or BLOCK with specific feedback.
+    tools: [read-file]
+    settings: { max_iterations: 2 }
+
+orchestrator:
+  name: Lead
+  strategy: Pipeline
+  provider: openai
+  model: gpt-4o-mini
+  agents: [Planner, Developer, Verifier, Reviewer]
+  pipeline:
+    steps:
+      - name: plan
+        agent: Planner
+        task: Analyze the request and create a step-by-step implementation plan.
+      - name: implement
+        agent: Developer
+        task: Implement the plan using available tools.
+      - name: verify
+        agent: Verifier
+        task: Test the implementation. Run commands to verify correctness.
+      - name: review
+        agent: Reviewer
+        task: Review the code changes for quality, security, and best practices.

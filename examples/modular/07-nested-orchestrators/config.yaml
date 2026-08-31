@@ -1,0 +1,65 @@
+# 07 — Nested Orchestrators (modular)
+#
+# Agents, tools, and sub-orchestrators are auto-discovered from subdirectories.
+# Only settings and the ROOT orchestrator are defined here.
+#
+# Hierarchy:
+#   ProjectLead (root — Pipeline)
+#   +-- BackendPipeline (sub-orchestrator — orchestrators/backend-pipeline.yaml)
+#   |   +-- BackendDesigner
+#   |   +-- BackendDeveloper
+#   |   +-- BackendTester
+#   +-- FrontendPipeline (sub-orchestrator — orchestrators/frontend-pipeline.yaml)
+#   |   +-- FrontendDesigner
+#   |   +-- FrontendDeveloper
+#   |   +-- FrontendTester
+#   +-- Integrator (agent — direct)
+#
+# Usage:
+#   rakitsu run examples/modular/07-nested-orchestrators/config.yaml "Build a full-stack todo app with Go backend and Vue frontend"
+
+name: Full-Stack Project
+version: "1.0"
+description: |
+  Multi-level orchestration: root pipeline delegates to backend and frontend
+  sub-pipelines, each running their own design -> implement -> test workflow.
+
+settings:
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+  defaults:
+    model: gpt-4o-mini
+    temperature: 0.3
+    max_tokens: 4096
+  execution:
+    max_iterations: 5
+    timeout_seconds: 600
+  allowed_commands:
+    - find
+    - grep
+    - cat
+    - ls
+
+orchestrator:
+  name: ProjectLead
+  strategy: Pipeline
+  provider: openai
+  model: gpt-4o-mini
+  system_prompt: |
+    Manage a full-stack project. Backend and frontend teams each have
+    their own pipeline. After both complete, run integration.
+  agents: [BackendPipeline, FrontendPipeline, Integrator]
+  pipeline:
+    steps:
+      - name: backend
+        agent: BackendPipeline
+        task: Build the complete backend (design, implement, test).
+      - name: frontend
+        agent: FrontendPipeline
+        task: Build the complete frontend (design, implement, test).
+      - name: integrate
+        agent: Integrator
+        task: Integrate backend and frontend. Verify all connections work.

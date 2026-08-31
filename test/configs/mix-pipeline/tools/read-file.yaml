@@ -1,0 +1,11 @@
+name: "read_file"
+type: "fs"
+description: "Read a file's contents"
+operation: "read"
+allowed_paths:
+  - "./test/workspace/"
+parameters:
+  path:
+    type: "string"
+    description: "File path (e.g., './test/workspace/app.py')"
+    required: true

@@ -1,0 +1,12 @@
+name: deep_analysis
+description: Thorough multi-step analysis workflow
+tools:
+  - read_file
+  - search_files
+  - list_files
+prompt_template: |
+  Perform a deep analysis:
+  1. Scan all relevant files
+  2. Identify patterns and anomalies
+  3. Cross-reference findings
+  4. Produce a structured report with evidence

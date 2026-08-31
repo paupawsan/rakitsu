@@ -1,0 +1,188 @@
+# 07 — Nested Orchestrators (Multi-Level)
+#
+# Root orchestrator delegates to sub-orchestrators, each managing their own pipeline.
+# This creates a 3-level hierarchy:
+#
+#   ProjectLead (root — Pipeline)
+#   ├── BackendPipeline (sub-orchestrator — Pipeline)
+#   │   ├── BackendDesigner
+#   │   ├── BackendDeveloper
+#   │   └── BackendTester
+#   ├── FrontendPipeline (sub-orchestrator — Pipeline)
+#   │   ├── FrontendDesigner
+#   │   ├── FrontendDeveloper
+#   │   └── FrontendTester
+#   └── Integrator (agent — direct)
+#
+# Key concepts:
+#   - `orchestrators:` (plural) defines sub-orchestrators
+#   - `orchestrator:` (singular) defines the root orchestrator
+#   - Sub-orchestrators implement the Runner interface — the root treats them like agents
+#   - If agents aren't explicitly listed in the root orchestrator's `agents:` field,
+#     run.go auto-includes orphaned agents and sub-orchestrators.
+#
+# Usage:
+#   rakitsu run examples/single/07-nested-orchestrators/config.yaml "Build a full-stack todo app with Go backend and Vue frontend"
+
+name: Full-Stack Project
+version: "1.0"
+description: |
+  Multi-level orchestration: root pipeline delegates to backend and frontend
+  sub-pipelines, each running their own design → implement → test workflow.
+
+settings:
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+  defaults:
+    model: gpt-4o-mini
+    temperature: 0.3
+    max_tokens: 4096
+  execution:
+    max_iterations: 5
+    timeout_seconds: 600
+  allowed_commands:
+    - find
+    - grep
+    - cat
+    - ls
+
+tools:
+  - name: read_file
+    type: fs
+    operation: read
+    allowed_paths:
+      - "."
+    description: Read a source file
+    parameters:
+      path: { type: string, description: "File path", required: true }
+
+  - name: write_file
+    type: fs
+    operation: write
+    allowed_paths:
+      - "."
+    description: Write a source file
+    parameters:
+      path: { type: string, description: "File path", required: true }
+      content: { type: string, description: "File content", required: true }
+
+  - name: run_command
+    type: cli
+    description: Run a shell command
+    command: "sh -c '{{command}}'"
+    parameters:
+      command: { type: string, description: "Command to execute", required: true }
+    sandbox:
+      type: local_restricted
+      resource_limits:
+        timeout_sec: 30
+
+# --- Worker agents (leaf nodes) ---
+
+agents:
+  - name: BackendDesigner
+    role: worker
+    system_prompt: Design the backend API — define endpoints, data models, and architecture.
+    tools: [read_file]
+    settings: { max_iterations: 3 }
+
+  - name: BackendDeveloper
+    role: worker
+    system_prompt: Implement the backend based on the design. Write clean, working Go code.
+    tools: [read_file, write_file]
+    settings: { max_iterations: 5 }
+
+  - name: BackendTester
+    role: worker
+    system_prompt: Test the backend. Run tests and report results.
+    tools: [read_file, run_command]
+    settings: { max_iterations: 3 }
+
+  - name: FrontendDesigner
+    role: worker
+    system_prompt: Design the frontend UI — components, layout, and user flow.
+    tools: [read_file]
+    settings: { max_iterations: 3 }
+
+  - name: FrontendDeveloper
+    role: worker
+    system_prompt: Implement the frontend based on the design. Write Vue.js components.
+    tools: [read_file, write_file]
+    settings: { max_iterations: 5 }
+
+  - name: FrontendTester
+    role: worker
+    system_prompt: Test the frontend. Check for UI issues and bugs.
+    tools: [read_file, run_command]
+    settings: { max_iterations: 3 }
+
+  - name: Integrator
+    role: worker
+    system_prompt: Integrate backend and frontend. Verify API connections work end-to-end.
+    tools: [read_file, run_command]
+    settings: { max_iterations: 3 }
+
+# --- Sub-orchestrators (each manages its own pipeline) ---
+
+orchestrators:
+  - name: BackendPipeline
+    strategy: Pipeline
+    provider: openai
+    model: gpt-4o-mini
+    system_prompt: Manage the backend team through design → implement → test.
+    agents: [BackendDesigner, BackendDeveloper, BackendTester]
+    pipeline:
+      steps:
+        - name: design
+          agent: BackendDesigner
+          task: Design the backend API architecture and data models.
+        - name: implement
+          agent: BackendDeveloper
+          task: Implement the backend based on the design.
+        - name: test
+          agent: BackendTester
+          task: Test the backend for bugs and edge cases.
+
+  - name: FrontendPipeline
+    strategy: Pipeline
+    provider: openai
+    model: gpt-4o-mini
+    system_prompt: Manage the frontend team through design → implement → test.
+    agents: [FrontendDesigner, FrontendDeveloper, FrontendTester]
+    pipeline:
+      steps:
+        - name: design
+          agent: FrontendDesigner
+          task: Design the frontend UI components and user flow.
+        - name: implement
+          agent: FrontendDeveloper
+          task: Implement the frontend based on the design.
+        - name: test
+          agent: FrontendTester
+          task: Test the frontend for UI issues.
+
+# --- Root orchestrator (delegates to sub-orchestrators) ---
+
+orchestrator:
+  name: ProjectLead
+  strategy: Pipeline
+  provider: openai
+  model: gpt-4o-mini
+  system_prompt: |
+    Manage a full-stack project. Backend and frontend teams each have
+    their own pipeline. After both complete, run integration.
+  agents: [BackendPipeline, FrontendPipeline, Integrator]
+  pipeline:
+    steps:
+      - name: backend
+        agent: BackendPipeline
+        task: Build the complete backend (design, implement, test).
+      - name: frontend
+        agent: FrontendPipeline
+        task: Build the complete frontend (design, implement, test).
+      - name: integrate
+        agent: Integrator
+        task: Integrate backend and frontend. Verify all connections work.

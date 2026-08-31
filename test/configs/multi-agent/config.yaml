@@ -1,0 +1,42 @@
+# Modular version of multi-agent.yaml
+#
+# Tests reflection with orchestrator and worker agents.
+# Agents and tools auto-discovered from agents/ and tools/ directories.
+#
+# Usage:
+#   rakitsu run -c test/configs/multi-agent/config.yaml "Review the workspace code"
+
+name: "Test - Multi Agent with Reflection"
+version: "1.0.0"
+description: "Tests reflection with orchestrator and worker agents"
+
+settings:
+  default_provider: "openai"
+  api_keys:
+    openai: "${OPENAI_API_KEY}"
+  defaults:
+    model: "gpt-4o-mini"
+    temperature: 0.7
+    max_tokens: 4096
+
+orchestrator:
+  name: "Supervisor"
+  strategy: "ReAct"
+  provider: "openai"
+  model: "gpt-4o-mini"
+  system_prompt: |
+    You are the Supervisor coordinating specialist agents.
+
+    Available specialists:
+    - Code Reviewer: Reviews source code quality
+    - Structure Explorer: Analyzes project structure
+
+    Break down the user's request, delegate to specialists, and synthesize results.
+  agents:
+    - "Code Reviewer"
+    - "Structure Explorer"
+  routing:
+    auto_delegate_tools: true
+  handoff:
+    include_context: true
+    max_context_length: 4000

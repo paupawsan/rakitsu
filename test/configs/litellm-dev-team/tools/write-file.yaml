@@ -1,0 +1,14 @@
+name: write_file
+type: fs
+description: Write or create a file
+operation: write
+allowed_paths: ["./"]
+parameters:
+  path:
+    type: string
+    description: File path
+    required: true
+  content:
+    type: string
+    description: File content
+    required: true

@@ -1,0 +1,26 @@
+# Provider Reference: LiteLLM Proxy
+#
+# LiteLLM acts as a proxy router — one endpoint, many models.
+# Configure your LiteLLM proxy separately, then point rakitsu at it.
+# See: https://docs.litellm.ai/
+
+name: LiteLLM Example
+version: "1.0"
+
+settings:
+  default_provider: litellm
+  providers:
+    litellm:
+      type: litellm
+      api_key: ${LITELLM_API_KEY:-not-needed}
+      base_url: ${LITELLM_BASE_URL:-http://localhost:4000}
+      default_model: gpt-4o-mini    # Model name as configured in LiteLLM
+  defaults:
+    model: gpt-4o-mini
+    temperature: 0.5
+    max_tokens: 4096
+
+agents:
+  - name: Assistant
+    role: worker
+    system_prompt: You are a helpful assistant routed through LiteLLM.

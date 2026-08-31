@@ -1,0 +1,63 @@
+# Modular version of gemini-pipeline.yaml
+#
+# 5-agent pipeline using Gemini 3.1 Flash Lite Preview.
+# Pipeline: Architect -> Developer -> Code Review + Security (parallel) -> Testing
+# Agents, tools, and skills auto-discovered from their directories.
+#
+# Usage:
+#   export GEMINI_API_KEY="..."
+#   rakitsu run -c test/configs/gemini-pipeline/config.yaml "Build a calculator module"
+
+name: "Gemini Pipeline Dev Team"
+version: "1.0.0"
+description: "5-agent pipeline using Gemini 3.1 Flash Lite to test pipeline strategy"
+
+settings:
+  default_provider: "gemini"
+  api_keys:
+    gemini: "${GEMINI_API_KEY}"
+  credentials_files:
+    gemini: "${GOOGLE_APPLICATION_CREDENTIALS:-test/configs/gemini-keys/service-account.json}"
+  allowed_commands:
+    - "python3"
+    - "pytest"
+    - "tree"
+  defaults:
+    model: "gemini-3.1-flash-lite-preview"
+    temperature: 0.5
+    max_tokens: 4096
+
+orchestrator:
+  name: "Tech Lead"
+  strategy: "Pipeline"
+  provider: "gemini"
+  model: "gemini-3.1-flash-lite-preview"
+  agents:
+    - "Architect"
+    - "Developer"
+    - "Code Reviewer"
+    - "Security Auditor"
+    - "Test Engineer"
+  pipeline:
+    steps:
+      - name: "design"
+        agent: "Architect"
+        task: "Analyze the requirements and design a modular solution. All files MUST be placed under ./test/workspace/ directory. Define the file structure, class hierarchy, function signatures with types, error handling strategy, and test strategy."
+
+      - name: "implement"
+        agent: "Developer"
+        task: "Implement the solution based on the architecture design. ALL files MUST be written under ./test/workspace/ (e.g., ./test/workspace/calculator.py). Use write_file to save each file. Do NOT create subdirectories — put all .py files directly in ./test/workspace/."
+
+      - name: "review"
+        type: "parallel"
+        steps:
+          - name: "code_review"
+            agent: "Code Reviewer"
+            task: "Review all implemented code in ./test/workspace/ for bugs, logic errors, edge cases, code quality, and type hint completeness. Use list_files on ./test/workspace/ first. Cite exact files and provide severity ratings."
+          - name: "security_audit"
+            agent: "Security Auditor"
+            task: "Audit all implemented code in ./test/workspace/ for security vulnerabilities. Check for injection flaws, input validation gaps, and insecure defaults. Rate by OWASP category."
+
+      - name: "test"
+        agent: "Test Engineer"
+        task: "Write pytest test suites for the code in ./test/workspace/. Save test files as ./test/workspace/test_*.py. Run the tests using run_tests and report results. ALL paths must start with ./test/workspace/."

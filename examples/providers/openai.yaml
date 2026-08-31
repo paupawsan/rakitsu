@@ -1,0 +1,19 @@
+# Provider Reference: OpenAI (direct)
+name: OpenAI Example
+version: "1.0"
+
+settings:
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+  defaults:
+    model: gpt-4o-mini
+    temperature: 0.7
+    max_tokens: 2048
+
+agents:
+  - name: Assistant
+    role: worker
+    system_prompt: You are a helpful assistant.

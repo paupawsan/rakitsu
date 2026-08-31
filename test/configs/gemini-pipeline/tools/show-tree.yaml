@@ -1,0 +1,10 @@
+name: "show_tree"
+type: "cli"
+description: "Show directory tree structure"
+command: "tree -L 3"
+sandbox:
+  type: "local_restricted"
+  allowed_paths:
+    - "./test/workspace/"
+  resource_limits:
+    timeout_sec: 10

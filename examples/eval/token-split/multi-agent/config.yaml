@@ -1,0 +1,177 @@
+# Eval B — Multi Agent (treatment arm for token-split comparison).
+#
+# SAME task, SAME tools, SAME model, SAME sampling as the single-agent arm.
+# Orchestration = Pipeline with 2 specialist workers + 1 synthesizer. Each
+# worker only has to READ its own subdomain's files — but Pipeline still
+# passes each prior step's full output forward, so FrontendAuditor's input
+# context includes BackendAuditor's audit, and each worker re-loads its own
+# system prompt on top of that. This is why the eval (see README) actually
+# found MORE total input tokens for this arm, not fewer.
+#
+# Run with:
+#   rakitsu run examples/eval/token-split/multi-agent/config.yaml \
+#     "Audit this repository: summarize the Go backend (internal/) in one \
+#      paragraph, then the Vue frontend (web/src/) in one paragraph." \
+#     --no-hub --timeout 900
+#
+# See: examples/eval/token-split/README.md
+
+name: Token-Split Eval — Multi Agent
+version: "1.0"
+description: |
+  Treatment arm. Pipeline: BackendAuditor -> FrontendAuditor -> Synthesizer.
+  Each worker owns only its subdomain. Compared against single-agent/
+  which does both audits in one ReAct loop.
+
+settings:
+  default_provider: litellm
+  providers:
+    litellm:
+      type: litellm
+      api_key: ${LITELLM_API_KEY:-not-needed}
+      base_url: ${LITELLM_BASE_URL:-http://localhost:4000}
+      default_model: your-model-alias
+  defaults:
+    model: your-model-alias
+    temperature: 0.1
+    top_p: 0.7
+    frequency_penalty: 0.5
+    presence_penalty: 0.3
+    max_tokens: 4096
+  execution:
+    max_iterations: 20
+    timeout_seconds: 900
+  context:
+    strategy: auto
+    max_tool_output: 4000
+    fence_outputs: true
+    context_budget_threshold: 0.6
+    context_retrieval_threshold: 0.8
+  allowed_commands:
+    - grep
+    - wc
+
+tools:
+  - name: list_files
+    type: fs
+    operation: list
+    description: "List files in a directory. Use for discovery."
+    allowed_paths:
+      - "."
+    parameters:
+      path: { type: string, description: "Directory path", required: true }
+
+  - name: read_file
+    type: fs
+    operation: read
+    description: "Read a file's full contents. Use only on small files."
+    allowed_paths:
+      - "."
+    parameters:
+      path: { type: string, description: "File path", required: true }
+
+  - name: search
+    type: cli
+    description: |
+      Fixed-string search in a file or dir, up to 30 matches with line numbers.
+      Use this BEFORE read_file on anything >8KB.
+    # pattern/path are passed as $1/$2 (not interpolated into the script
+    # text) so a value containing shell metacharacters can't break out of
+    # the quoting — see the safe `sh -c 'script' _ "$@"` idiom.
+    command: "sh -c 'grep -rn -C 2 -m 30 -F -- \"$1\" \"$2\" || echo \"(no matches)\"' _ {{pattern}} {{path}}"
+    parameters:
+      pattern: { type: string, description: "Fixed string", required: true }
+      path:    { type: string, description: "File or directory",  required: true }
+    sandbox:
+      type: local_restricted
+      resource_limits:
+        timeout_sec: 10
+
+agents:
+  - name: BackendAuditor
+    role: worker
+    system_prompt: |
+      You audit the Go backend only. Process:
+        1. list_files(path="internal") to see Go packages.
+        2. For 2-3 of those packages, search(pattern="func ", path="internal/<pkg>")
+           to sample exported functions. Do NOT read_file on anything >8KB.
+        3. Produce markdown in exactly this shape, nothing else:
+
+           ## Go backend (internal/)
+           <one paragraph, ~120 words>
+
+      Hard budget: at most 5 tool calls. Partial beats infinite. Do NOT audit
+      the frontend — that is the next agent's job.
+      Never invent package names.
+    tools:
+      - list_files
+      - read_file
+      - search
+    settings:
+      max_iterations: 8
+
+  - name: FrontendAuditor
+    role: worker
+    system_prompt: |
+      You audit the Vue frontend only. You receive the backend audit in your
+      input context — do NOT re-audit the backend. Focus only on Vue.
+      Process:
+        1. list_files(path="web/src/components") to see Vue component groups.
+        2. For 2-3 of those groups, list_files or search to sample their contents.
+        3. Produce markdown in exactly this shape, nothing else:
+
+           ## Vue frontend (web/src/)
+           <one paragraph, ~120 words>
+
+      Hard budget: at most 5 tool calls. Partial beats infinite.
+      Never invent component names.
+    tools:
+      - list_files
+      - read_file
+      - search
+    settings:
+      max_iterations: 8
+
+  - name: Synthesizer
+    role: worker
+    system_prompt: |
+      You combine the two prior audits into a single output. You have NO
+      tools and must not call any. Simply relay both audits, in order:
+
+      ## Go backend (internal/)
+      <BackendAuditor's paragraph, verbatim>
+
+      ## Vue frontend (web/src/)
+      <FrontendAuditor's paragraph, verbatim>
+
+      Do not add commentary. Do not re-summarize. Relay only.
+    tools: []
+    settings:
+      temperature: 0.3
+      max_tokens: 2048
+      max_iterations: 2
+
+orchestrator:
+  name: AuditPipeline
+  strategy: Pipeline
+  provider: litellm
+  model: your-model-alias
+  agents:
+    - BackendAuditor
+    - FrontendAuditor
+    - Synthesizer
+  pipeline:
+    synthesis: false   # explicit Synthesizer step; no separate LLM synthesis call
+    steps:
+      - name: backend
+        agent: BackendAuditor
+        task: "Audit the Go backend under internal/ and produce the Go paragraph."
+        timeout_sec: 300
+      - name: frontend
+        agent: FrontendAuditor
+        task: "Audit the Vue frontend under web/src/ and produce the Vue paragraph."
+        timeout_sec: 300
+      - name: synthesize
+        agent: Synthesizer
+        task: "Relay both audit paragraphs into the final output."
+        timeout_sec: 60

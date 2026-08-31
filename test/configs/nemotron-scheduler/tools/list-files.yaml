@@ -1,0 +1,11 @@
+name: "list_files"
+type: "fs"
+description: "List files and directories at a path"
+operation: "list"
+allowed_paths:
+  - "."
+parameters:
+  path:
+    type: "string"
+    description: "Directory path relative to cwd (e.g., './', './src/')"
+    required: true

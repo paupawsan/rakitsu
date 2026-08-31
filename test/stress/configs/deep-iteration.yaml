@@ -1,0 +1,29 @@
+name: stress-deep-iteration
+version: "1.0"
+description: Deep iteration agent (50 max_iterations) for stress testing
+
+settings:
+  default_provider: mock
+  defaults:
+    model: mock-model
+    temperature: 0.7
+    max_tokens: 1024
+  execution:
+    max_iterations: 50
+    timeout_seconds: 300
+
+tools:
+  - name: echo
+    type: cli
+    description: Echo tool
+    command: echo
+    allowed_args: ["*"]
+
+agents:
+  - name: deep-worker
+    role: worker
+    provider: mock
+    model: mock-model
+    system_prompt: "You are a deep iteration worker."
+    tools: [echo]
+    max_iterations: 50

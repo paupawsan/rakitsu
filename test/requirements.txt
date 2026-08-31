@@ -1,0 +1,23 @@
+fastapi==0.110.2
+uvicorn[standard]==0.27.1
+sqlmodel==0.0.16
+psycopg2-binary==2.9.9
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+pydantic-settings==2.2.2
+python-multipart==0.0.9
+python-dotenv==1.0.0
+# Testing
+pytest==7.4.2
+pytest-asyncio==0.23.5
+httpx==0.25.0
+pytest-cov==4.1.1
+# For Docker testcontainers
+testcontainers==3.7.0
+# Logging
+structlog==24.1.0
+loguru==0.7.2
+# OpenTelemetry (optional)
+opentelemetry-sdk==1.27.0
+opentelemetry-exporter-otlp==1.27.0
+opentelemetry-instrumentation-fastapi==0.43b0

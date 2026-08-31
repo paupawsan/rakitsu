@@ -1,0 +1,116 @@
+# 04 — Pipeline with Parallel Steps and Synthesis
+#
+# Deterministic pipeline: steps run in fixed order. No tool calling required by the LLM —
+# the orchestrator controls execution flow. Best for models without function-calling support.
+#
+# This example demonstrates:
+#   - Sequential steps (research → draft → edit)
+#   - Parallel steps (translate to 3 languages simultaneously)
+#   - Synthesis (LLM combines all outputs into final report)
+#   - Step timeout
+#
+# Usage:
+#   rakitsu run examples/single/04-pipeline/config.yaml "Write a technical blog post about WebAssembly"
+
+name: Content Publishing Pipeline
+version: "1.0"
+description: Multi-stage content pipeline with parallel translation and synthesis.
+
+settings:
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+  defaults:
+    model: gpt-4o-mini
+    temperature: 0.5
+    max_tokens: 4096
+  execution:
+    timeout_seconds: 300
+
+agents:
+  - name: Researcher
+    role: worker
+    system_prompt: |
+      Research the given topic thoroughly. Gather key facts, statistics,
+      and expert opinions. Output a structured research brief with sources.
+    settings:
+      max_iterations: 3
+
+  - name: Drafter
+    role: worker
+    system_prompt: |
+      Write a compelling blog post based on the research provided.
+      Use clear structure: introduction, body sections, conclusion.
+      Target audience: developers with intermediate knowledge.
+    settings:
+      max_iterations: 2
+
+  - name: Editor
+    role: worker
+    system_prompt: |
+      Edit the draft for clarity, accuracy, and engagement.
+      Fix grammar, improve flow, and ensure technical accuracy.
+      Output the final polished version.
+    settings:
+      max_iterations: 2
+
+  - name: TranslatorES
+    role: worker
+    system_prompt: Translate the content to Spanish. Preserve technical terms.
+    settings: { max_iterations: 1 }
+
+  - name: TranslatorJP
+    role: worker
+    system_prompt: Translate the content to Japanese. Preserve technical terms.
+    settings: { max_iterations: 1 }
+
+  - name: TranslatorFR
+    role: worker
+    system_prompt: Translate the content to French. Preserve technical terms.
+    settings: { max_iterations: 1 }
+
+orchestrator:
+  name: Publisher
+  strategy: Pipeline
+  provider: openai
+  model: gpt-4o-mini
+  agents:
+    - Researcher
+    - Drafter
+    - Editor
+    - TranslatorES
+    - TranslatorJP
+    - TranslatorFR
+  pipeline:
+    synthesis: true
+    synthesis_prompt: |
+      Compile the edited blog post and all translations into a final publishing package.
+      List the original (English) and each translation with a brief summary.
+    steps:
+      - name: research
+        agent: Researcher
+        task: Research the topic and produce a structured brief.
+        timeout_sec: 60
+
+      - name: draft
+        agent: Drafter
+        task: Write the blog post based on the research.
+
+      - name: edit
+        agent: Editor
+        task: Edit and polish the draft.
+
+      - name: translate
+        type: parallel
+        steps:
+          - name: spanish
+            agent: TranslatorES
+            task: Translate the edited post to Spanish.
+          - name: japanese
+            agent: TranslatorJP
+            task: Translate the edited post to Japanese.
+          - name: french
+            agent: TranslatorFR
+            task: Translate the edited post to French.

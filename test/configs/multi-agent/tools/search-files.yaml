@@ -1,0 +1,6 @@
+name: "search_files"
+type: "fs"
+description: "Search for content in files"
+operation: "search"
+allowed_paths:
+  - "/workspace"

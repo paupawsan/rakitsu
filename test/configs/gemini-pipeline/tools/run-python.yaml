@@ -1,0 +1,10 @@
+name: "run_python"
+type: "cli"
+description: "Execute a Python3 script and return stdout/stderr output"
+command: "python3"
+sandbox:
+  type: "local_restricted"
+  allowed_paths:
+    - "./test/workspace/"
+  resource_limits:
+    timeout_sec: 30

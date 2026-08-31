@@ -1,0 +1,49 @@
+name: stress-pipeline-parallel
+version: "1.0"
+description: Pipeline with 3 parallel steps for stress testing
+
+settings:
+  default_provider: mock
+  defaults:
+    model: mock-model
+    temperature: 0.7
+    max_tokens: 1024
+  execution:
+    max_iterations: 10
+    timeout_seconds: 120
+
+tools:
+  - name: echo
+    type: cli
+    description: Echo tool
+    command: echo
+    allowed_args: ["*"]
+
+agents:
+  - name: analyzer
+    role: worker
+    provider: mock
+    model: mock-model
+    system_prompt: "You analyze data."
+    tools: [echo]
+
+  - name: processor
+    role: worker
+    provider: mock
+    model: mock-model
+    system_prompt: "You process data."
+    tools: [echo]
+
+  - name: validator
+    role: worker
+    provider: mock
+    model: mock-model
+    system_prompt: "You validate data."
+    tools: [echo]
+
+orchestrator:
+  strategy: Pipeline
+  steps:
+    - name: parallel-analysis
+      type: parallel
+      agents: [analyzer, processor, validator]
