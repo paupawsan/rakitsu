@@ -41,9 +41,16 @@ Features:
   • Pipeline and hierarchical orchestration strategies
 
 Quick start:
+  rakitsu run --interactive                 Chat right now — no config needed
   rakitsu run agent.yaml "your query"       Run a single agent
+  rakitsu run agent.yaml --interactive      Chat interactively with your own config
+  rakitsu scaffold <use-case>               Generate a config from a use-case preset
+  rakitsu quickstart                        Interactive wizard — no YAML needed
   rakitsu serve                             Start the web UI + monitoring hub
   rakitsu doctor agent.yaml                 Check config + provider health
+
+  Progressive sample configs (single-file and modular) live under
+  examples/ in the repo — see examples/README.md.
 
 Architecture:
   rakitsu serve    Web UI + standalone SSE hub — visual builder, run launcher,

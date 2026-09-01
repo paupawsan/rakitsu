@@ -99,11 +99,12 @@ type Agent struct {
 	// Per-Run unproductive state — a strict superset of salvaged. Set when
 	// the agent terminates without producing a usable answer:
 	// salvaged_no_progress, max_iterations+empty lastResponse,
-	// success+empty finalAnswer (reasoning-budget exhaustion), or
-	// iteration-level budget_exceeded+empty lastResponse. "Empty" uses
-	// strings.TrimSpace(...) == "" throughout — see LastRunUnproductive
-	// docstring for the rationale. Reset at the top of each Run. Read via
-	// LastRunUnproductive().
+	// truncated_empty (success+empty finalAnswer with finish_reason=length,
+	// i.e. reasoning-budget exhaustion), success+empty finalAnswer for any
+	// other finish_reason, or iteration-level budget_exceeded+empty
+	// lastResponse. "Empty" uses strings.TrimSpace(...) == "" throughout —
+	// see LastRunUnproductive docstring for the rationale. Reset at the top
+	// of each Run. Read via LastRunUnproductive().
 	lastRunUnproductive atomic.Bool
 
 	// rollback holds the resolved per-agent runtime self-correction config.
@@ -1012,6 +1013,22 @@ func (a *Agent) RunWithAttachments(ctx context.Context, query string, history []
 				// "successfully" with nothing to return). Supervisor must
 				// not loop on it.
 				a.lastRunUnproductive.Store(true)
+				if result.FinishReason == "length" {
+					// The model exhausted its output-token budget before
+					// producing any visible content (common with reasoning
+					// models such as gpt-5-nano, whose hidden reasoning
+					// tokens share the same budget as the answer). Leaving
+					// finalAnswer=="" with status="success" here renders as
+					// total silence in chat hosts — AgentDoneMsg{Response:
+					// "", Err: nil} hits neither the error branch nor the
+					// msg.Response != "" branch in internal/chat/model.go,
+					// so the pre-existing empty BlockAssistant placeholder
+					// never gets text and prints nothing. Same synthesized-
+					// marker idiom as the budget_exceeded / max_iterations
+					// exits elsewhere in this function.
+					finalStatus = "truncated_empty"
+					finalAnswer = "[truncated: model ran out of output tokens before answering (finish_reason=length) — raise --max-tokens or settings.defaults.max_tokens]"
+				}
 			}
 
 			// TurnGuard: cross-check the settled final answer against
@@ -1963,9 +1980,13 @@ func (a *Agent) LastRunSalvaged() bool {
 //     agent-side recovery loop exhausted)
 //   - status="max_iterations" with empty lastResponse (iteration budget
 //     burned without committing any partial response)
+//   - status="truncated_empty" with empty finalAnswer (no-tool-calls exit on
+//     a reasoning model that ran out of output tokens before answering,
+//     finish_reason=length; the synthesized marker text is not "empty",
+//     but the underlying LLM answer was)
 //   - status="success" with empty finalAnswer (no-tool-calls exit on a
-//     model that put everything in ThinkingContent or produced nothing;
-//     reasoning-budget exhaustion)
+//     model that put everything in ThinkingContent or produced nothing for
+//     any other finish_reason)
 //   - status="budget_exceeded" with empty lastResponse, reached via the
 //     iteration-level guard check that returns a nil error (the only
 //     budget_exceeded path the orchestrator's cap can observe; the

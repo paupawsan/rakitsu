@@ -1,11 +1,6 @@
-# Interim CI: Go build/vet/test only. The project's own frontend build
-# steps and full packaging pipeline will be added once the frontend source
-# (web/) has landed.
-#
-# internal/webui embeds the built frontend via `//go:embed all:dist`, which
-# needs at least one file under dist/ to compile — the placeholder step
-# below stands in for the real "build frontend, embed it" step until the
-# frontend source ships.
+# Builds the frontend, embeds it into the Go binary (internal/webui's
+# //go:embed all:dist needs at least one file under dist/ to compile),
+# then tests/vets/builds/verifies the binary.
 name: CI
 
 on:
@@ -20,7 +15,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -30,10 +25,24 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
-      - name: Placeholder frontend (real one lands at a later rung)
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '20'
+
+      - name: Install frontend deps
+        run: cd web && npm ci
+
+      - name: Audit npm dependencies
+        run: cd web && npm audit --audit-level=high --omit=dev
+
+      - name: Build frontend
+        run: cd web && npm run build
+
+      - name: Embed frontend
         run: |
+          rm -rf internal/webui/dist
           mkdir -p internal/webui/dist
-          echo '<!doctype html><title>rakitsu</title><p>Frontend not yet ported — see the port series in this repo'"'"'s PR history.</p>' > internal/webui/dist/index.html
+          cp -r web/dist/. internal/webui/dist/
 
       - name: Go tests
         run: go test ./...
@@ -41,5 +50,8 @@ jobs:
       - name: Go vet
         run: go vet ./...
 
-      - name: Go build
-        run: go build ./...
+      - name: Build binary
+        run: go build -o bin/rakitsu ./cmd/rakitsu
+
+      - name: Verify binary
+        run: ./bin/rakitsu --version

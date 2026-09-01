@@ -1,0 +1,21 @@
+.git
+.claude
+node_modules
+web/node_modules
+web/dist
+internal/webui/dist
+*.md
+test/
+# Bare patterns like *.key only match the build context ROOT, same reason
+# web/node_modules has to be spelled out separately from node_modules above
+# — dockerignore's matching does not treat an unslashed pattern as "any
+# depth" the way .gitignore does. **/ makes these match everywhere.
+**/.env*
+**/*.env
+**/*.pem
+**/*.key
+**/*.json.key
+**/service-account*.json
+**/gemini-keys/
+**/.npmrc
+credentials/

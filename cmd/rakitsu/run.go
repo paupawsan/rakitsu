@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -40,6 +41,13 @@ var runCmd = &cobra.Command{
 	Long: `Run an agent with the specified YAML configuration file and query.
 The agent will execute using the ReAct loop, calling tools as needed.
 
+Config is optional with --interactive: with no config.yaml given, a minimal
+keyless (Ollama) chat config is created once at ~/.rakitsu/default-agent.yaml
+and reused on every later configless --interactive run — edit that file
+directly to add tools or switch provider. One-shot runs (no --interactive)
+still need an explicit config, since a single remaining argument would be
+ambiguous between a config path and a query.
+
 By default, the CLI auto-connects to a running SSE hub (rakitsu serve) at
 http://localhost:9100 to stream events for real-time monitoring. If no hub
 is running, the agent runs standalone — no overhead, no errors.
@@ -59,24 +67,25 @@ Standalone debug mode (--debug-port):
 
 Examples:
   rakitsu run agent.yaml "What pods are running?"
+  rakitsu run --interactive
+  rakitsu run agent.yaml --interactive
+  rakitsu run examples/single/01-chat/config.yaml "Hello!"
   rakitsu run agent.yaml "Analyze errors" --trace
   rakitsu run agent.yaml "Debug issue" --verbose
   rakitsu run agent.yaml "Build app" --hub http://myhost:9100
   rakitsu run agent.yaml "Quick test" --no-hub
   rakitsu run agent.yaml "Debug" --debug-port 9200
-  rakitsu run agent.yaml "Query" --provider litellm --model gpt-4o
-
-Flags:
-  --hub URL        SSE hub URL (default http://localhost:9100)
-  --no-hub         Disable hub connection entirely
-  --debug-port N   Start standalone debug server on port N
-  --provider NAME  Override default provider for all agents (e.g. litellm, ollama)
-  --model NAME     Override default model for all agents
-  --trace          Show real-time color-coded execution trace on stderr
-  --timeout N      Total execution timeout in seconds (default 300; <=0 disables)
-  --idle-timeout N Cancel if no streaming activity for N seconds (0=disabled)
-  --verbose        Print agent/model info before execution`,
-	Args: cobra.MinimumNArgs(1),
+  rakitsu run agent.yaml "Query" --provider litellm --model gpt-4o`,
+	// Zero args is only valid combined with --interactive (falls back to the
+	// auto-bootstrapped default config, see ensureDefaultConfig) — one-shot
+	// mode still needs an explicit config, cobra has already parsed flags by
+	// the time Args runs so interactiveFlag reflects the actual invocation.
+	Args: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 && interactiveFlag {
+			return nil
+		}
+		return cobra.MinimumNArgs(1)(cmd, args)
+	},
 	RunE: runAgent,
 }
 
@@ -94,6 +103,7 @@ var (
 	runWorkdir         string
 	providerOverride   string
 	modelOverride      string
+	maxTokensOverride  int
 	interactiveFlag    bool
 	attachPaths        []string
 )
@@ -113,6 +123,7 @@ func init() {
 	runCmd.Flags().StringVar(&embeddingProvider, "embedding-provider", "", "provider for context retrieval embeddings (e.g. openai, gemini, ollama); overrides config")
 	runCmd.Flags().StringVar(&providerOverride, "provider", "", "override default provider for all agents (e.g. litellm, ollama, anthropic)")
 	runCmd.Flags().StringVar(&modelOverride, "model", "", "override default model for all agents (e.g. gpt-4o, claude-sonnet-4-20250514)")
+	runCmd.Flags().IntVar(&maxTokensOverride, "max-tokens", 0, "override max output tokens for all agents/orchestrators (0=leave config value); raise this for reasoning models like gpt-5-nano, whose hidden reasoning tokens share the same budget as visible output")
 	runCmd.Flags().BoolVarP(&interactiveFlag, "interactive", "i", false, "run as interactive chat (overrides config interactive flag)")
 	runCmd.Flags().StringArrayVar(&attachPaths, "attach", nil, "attach a local image file to the query (repeatable, e.g. --attach a.png --attach b.png); requires the resolved agent's `vision: true`")
 }
@@ -192,11 +203,135 @@ func startIdleWatchdog(ctx context.Context, bus *telemetry.EventBus, idle time.D
 	}()
 }
 
+// defaultConfigPath returns the location of the auto-bootstrapped configless
+// --interactive config. Same os.UserHomeDir()+filepath.Join(home, ".rakitsu",
+// ...) pattern already used for the session store and memory dir (see
+// internal/store/store.go, internal/memory/memory.go) — no new shared helper,
+// just matching how this repo already does it in two other places.
+func defaultConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".rakitsu", "default-agent.yaml"), nil
+}
+
+// ensureDefaultConfig writes a minimal, keyless (Ollama) chat config — with
+// read-only fs tools scoped to the current directory, no shell/write access —
+// to path if nothing exists there yet. Never overwrites an existing file —
+// once created, it's a real file the user can edit (add tools, switch provider),
+// not something regenerated on every run.
+func ensureDefaultConfig(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	const defaultConfigYAML = `# Auto-created by 'rakitsu run --interactive' the first time it ran with no
+# config given. Edit freely — add tools, switch provider — this file is
+# yours now and won't be regenerated. For something more capable to start
+# from instead, see 'rakitsu scaffold --list' or 'rakitsu quickstart'.
+#
+# Runs keyless against local Ollama by default (https://ollama.com):
+#   ollama pull llama3.1:8b
+# Prefer a cloud model? Uncomment a provider under settings.providers below.
+
+name: Default Assistant
+version: "1.0"
+description: Conversational assistant with read-only access to the current directory.
+interactive: true
+
+settings:
+  default_provider: ollama
+  providers:
+    ollama:
+      type: ollama
+      base_url: http://localhost:11434/v1
+    # Alternatives — uncomment one and set default_provider + defaults.model above:
+    # openai:
+    #   type: openai
+    #   api_key: ${OPENAI_API_KEY}
+    # anthropic:
+    #   type: anthropic
+    #   api_key: ${ANTHROPIC_API_KEY}
+    # litellm:
+    #   type: litellm
+    #   api_key: ${LITELLM_API_KEY:-not-needed}
+    #   base_url: ${LITELLM_BASE_URL:-http://localhost:4000}
+  defaults:
+    model: llama3.1:8b
+    temperature: 0.7
+    max_tokens: 2048
+
+tools:
+  - name: list_files
+    type: fs
+    operation: list
+    allowed_paths:
+      - "."
+    description: List files in a directory
+    parameters:
+      path: { type: string, description: "Directory path to list", required: true }
+
+  - name: read_file
+    type: fs
+    operation: read
+    allowed_paths:
+      - "."
+    description: Read file contents
+    parameters:
+      path: { type: string, description: "File path to read", required: true }
+
+  - name: search_files
+    type: fs
+    operation: search
+    allowed_paths:
+      - "."
+    description: Search for text patterns across files
+    parameters:
+      pattern: { type: string, description: "Search pattern (regex)", required: true }
+      path: { type: string, description: "Directory to search in", required: true }
+
+agents:
+  - name: Assistant
+    role: worker
+    system_prompt: |
+      You are a helpful, friendly assistant. Answer questions clearly and concisely.
+      If you don't know something, say so honestly. You have read-only access to
+      files in the current directory via list_files, read_file, and search_files —
+      use them when a question is about a local file; you cannot write, delete, or
+      run commands, and you cannot see images unless one was attached to the query.
+    settings:
+      max_iterations: 6
+`
+	return os.WriteFile(path, []byte(defaultConfigYAML), 0o644)
+}
+
 func runAgent(cmd *cobra.Command, args []string) (runErr error) {
-	configPath := args[0]
+	var configPath string
 	query := ""
-	if len(args) >= 2 {
-		query = args[1]
+	if len(args) == 0 {
+		// Only reachable when --interactive is set — runCmd.Args already
+		// enforced that. Bootstraps once, reused (not regenerated) on every
+		// later configless run so a user's edits to it stick.
+		path, err := defaultConfigPath()
+		if err != nil {
+			return fmt.Errorf("cannot determine default config path: %w", err)
+		}
+		if err := ensureDefaultConfig(path); err != nil {
+			return fmt.Errorf("cannot create default config at %s: %w", path, err)
+		}
+		fmt.Printf("No config given — using the default at %s (edit it directly, or run "+
+			"'rakitsu scaffold'/'rakitsu quickstart' for something more capable).\n", path)
+		configPath = path
+	} else {
+		configPath = args[0]
+		if len(args) >= 2 {
+			query = args[1]
+		}
 	}
 
 	// Load configuration
@@ -278,6 +413,33 @@ func runAgent(cmd *cobra.Command, args []string) (runErr error) {
 			cfg.Orchestrators[i].Model = modelOverride
 		}
 		fmt.Fprintf(os.Stderr, "Model override: %s\n", modelOverride)
+	}
+	if maxTokensOverride > 0 {
+		cfg.Settings.Defaults.MaxTokens = maxTokensOverride
+		// Unlike Model (a plain string field), MaxTokens lives inside the
+		// nilable ModelConfig pointer on both AgentDefinition and
+		// OrchestratorConfig — allocate it before setting the field so a
+		// config with no model_config block still gets clobbered. Mirrors
+		// the modelOverride clobber above.
+		for i := range cfg.Agents {
+			if cfg.Agents[i].ModelConfig == nil {
+				cfg.Agents[i].ModelConfig = &config.ModelConfig{}
+			}
+			cfg.Agents[i].ModelConfig.MaxTokens = maxTokensOverride
+		}
+		if cfg.Orchestrator != nil {
+			if cfg.Orchestrator.ModelConfig == nil {
+				cfg.Orchestrator.ModelConfig = &config.ModelConfig{}
+			}
+			cfg.Orchestrator.ModelConfig.MaxTokens = maxTokensOverride
+		}
+		for i := range cfg.Orchestrators {
+			if cfg.Orchestrators[i].ModelConfig == nil {
+				cfg.Orchestrators[i].ModelConfig = &config.ModelConfig{}
+			}
+			cfg.Orchestrators[i].ModelConfig.MaxTokens = maxTokensOverride
+		}
+		fmt.Fprintf(os.Stderr, "Max tokens override: %d\n", maxTokensOverride)
 	}
 
 	// Apply workdir to all tools that don't have their own

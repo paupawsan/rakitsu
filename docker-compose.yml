@@ -1,0 +1,60 @@
+services:
+  # Single agent test with reflection + ground-check
+  test-single:
+    build: .
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ./test/workspace:/workspace
+      - ./test/configs:/configs
+    command: ["run", "/configs/single-agent.yaml", "List the files in the current directory and summarize what you find."]
+
+  # Multi-agent test with orchestrator
+  test-multi:
+    build: .
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ./test/workspace:/workspace
+      - ./test/configs:/configs
+    command: ["run", "/configs/multi-agent.yaml", "Analyze the project structure and read the main application file, then provide a summary."]
+
+  # Gemini provider test (API key)
+  test-gemini:
+    build: .
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    volumes:
+      - ./test/workspace:/workspace
+      - ./test/configs:/configs
+    command: ["run", "/configs/gemini-agent.yaml", "List the files in the current directory and summarize what you find."]
+
+  # Gemini provider test (service account / ADC)
+  test-gemini-sa:
+    build: .
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/credentials/service-account.json
+    volumes:
+      - ./test/workspace:/workspace
+      - ./test/configs:/configs
+      - ${GOOGLE_SA_KEY_PATH:-./credentials}:/credentials:ro
+    command: ["run", "/configs/gemini-agent.yaml", "List the files in the current directory and summarize what you find."]
+
+  # UI server for visual inspection
+  test-ui:
+    build: .
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # Required: serve refuses to bind a non-loopback host without this set
+      # (unauthenticated, code-execution-capable API otherwise). Set your own
+      # value in a .env file or the shell environment before running this.
+      - RAKITSU_API_TOKEN=${RAKITSU_API_TOKEN:?set RAKITSU_API_TOKEN before running test-ui}
+    volumes:
+      - ./test/workspace:/workspace
+      - ./test/configs:/configs
+    ports:
+      # Loopback-only: RAKITSU_API_TOKEN gates the app itself, but this is a
+      # local-inspection service with no reason to also publish the port to
+      # the whole LAN by default.
+      - "127.0.0.1:8080:8080"
+    command: ["serve", "--host", "0.0.0.0", "--port", "8080"]
