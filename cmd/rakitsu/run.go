@@ -103,6 +103,7 @@ var (
 	runWorkdir         string
 	providerOverride   string
 	modelOverride      string
+	maxTokensOverride  int
 	interactiveFlag    bool
 	attachPaths        []string
 )
@@ -122,6 +123,7 @@ func init() {
 	runCmd.Flags().StringVar(&embeddingProvider, "embedding-provider", "", "provider for context retrieval embeddings (e.g. openai, gemini, ollama); overrides config")
 	runCmd.Flags().StringVar(&providerOverride, "provider", "", "override default provider for all agents (e.g. litellm, ollama, anthropic)")
 	runCmd.Flags().StringVar(&modelOverride, "model", "", "override default model for all agents (e.g. gpt-4o, claude-sonnet-4-20250514)")
+	runCmd.Flags().IntVar(&maxTokensOverride, "max-tokens", 0, "override max output tokens for all agents/orchestrators (0=leave config value); raise this for reasoning models like gpt-5-nano, whose hidden reasoning tokens share the same budget as visible output")
 	runCmd.Flags().BoolVarP(&interactiveFlag, "interactive", "i", false, "run as interactive chat (overrides config interactive flag)")
 	runCmd.Flags().StringArrayVar(&attachPaths, "attach", nil, "attach a local image file to the query (repeatable, e.g. --attach a.png --attach b.png); requires the resolved agent's `vision: true`")
 }
@@ -214,9 +216,10 @@ func defaultConfigPath() (string, error) {
 	return filepath.Join(home, ".rakitsu", "default-agent.yaml"), nil
 }
 
-// ensureDefaultConfig writes a minimal, keyless (Ollama) chat config to path
-// if nothing exists there yet. Never overwrites an existing file — once
-// created, it's a real file the user can edit (add tools, switch provider),
+// ensureDefaultConfig writes a minimal, keyless (Ollama) chat config — with
+// read-only fs tools scoped to the current directory, no shell/write access —
+// to path if nothing exists there yet. Never overwrites an existing file —
+// once created, it's a real file the user can edit (add tools, switch provider),
 // not something regenerated on every run.
 func ensureDefaultConfig(path string) error {
 	if _, err := os.Stat(path); err == nil {
@@ -238,7 +241,7 @@ func ensureDefaultConfig(path string) error {
 
 name: Default Assistant
 version: "1.0"
-description: Minimal conversational assistant — no tools, no orchestration.
+description: Conversational assistant with read-only access to the current directory.
 interactive: true
 
 settings:
@@ -263,14 +266,46 @@ settings:
     temperature: 0.7
     max_tokens: 2048
 
+tools:
+  - name: list_files
+    type: fs
+    operation: list
+    allowed_paths:
+      - "."
+    description: List files in a directory
+    parameters:
+      path: { type: string, description: "Directory path to list", required: true }
+
+  - name: read_file
+    type: fs
+    operation: read
+    allowed_paths:
+      - "."
+    description: Read file contents
+    parameters:
+      path: { type: string, description: "File path to read", required: true }
+
+  - name: search_files
+    type: fs
+    operation: search
+    allowed_paths:
+      - "."
+    description: Search for text patterns across files
+    parameters:
+      pattern: { type: string, description: "Search pattern (regex)", required: true }
+      path: { type: string, description: "Directory to search in", required: true }
+
 agents:
   - name: Assistant
     role: worker
     system_prompt: |
       You are a helpful, friendly assistant. Answer questions clearly and concisely.
-      If you don't know something, say so honestly.
+      If you don't know something, say so honestly. You have read-only access to
+      files in the current directory via list_files, read_file, and search_files —
+      use them when a question is about a local file; you cannot write, delete, or
+      run commands, and you cannot see images unless one was attached to the query.
     settings:
-      max_iterations: 1
+      max_iterations: 6
 `
 	return os.WriteFile(path, []byte(defaultConfigYAML), 0o644)
 }
@@ -378,6 +413,33 @@ func runAgent(cmd *cobra.Command, args []string) (runErr error) {
 			cfg.Orchestrators[i].Model = modelOverride
 		}
 		fmt.Fprintf(os.Stderr, "Model override: %s\n", modelOverride)
+	}
+	if maxTokensOverride > 0 {
+		cfg.Settings.Defaults.MaxTokens = maxTokensOverride
+		// Unlike Model (a plain string field), MaxTokens lives inside the
+		// nilable ModelConfig pointer on both AgentDefinition and
+		// OrchestratorConfig — allocate it before setting the field so a
+		// config with no model_config block still gets clobbered. Mirrors
+		// the modelOverride clobber above.
+		for i := range cfg.Agents {
+			if cfg.Agents[i].ModelConfig == nil {
+				cfg.Agents[i].ModelConfig = &config.ModelConfig{}
+			}
+			cfg.Agents[i].ModelConfig.MaxTokens = maxTokensOverride
+		}
+		if cfg.Orchestrator != nil {
+			if cfg.Orchestrator.ModelConfig == nil {
+				cfg.Orchestrator.ModelConfig = &config.ModelConfig{}
+			}
+			cfg.Orchestrator.ModelConfig.MaxTokens = maxTokensOverride
+		}
+		for i := range cfg.Orchestrators {
+			if cfg.Orchestrators[i].ModelConfig == nil {
+				cfg.Orchestrators[i].ModelConfig = &config.ModelConfig{}
+			}
+			cfg.Orchestrators[i].ModelConfig.MaxTokens = maxTokensOverride
+		}
+		fmt.Fprintf(os.Stderr, "Max tokens override: %d\n", maxTokensOverride)
 	}
 
 	// Apply workdir to all tools that don't have their own
