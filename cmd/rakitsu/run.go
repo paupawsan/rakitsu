@@ -59,23 +59,14 @@ Standalone debug mode (--debug-port):
 
 Examples:
   rakitsu run agent.yaml "What pods are running?"
+  rakitsu run agent.yaml --interactive
+  rakitsu run examples/single/01-chat/config.yaml "Hello!"
   rakitsu run agent.yaml "Analyze errors" --trace
   rakitsu run agent.yaml "Debug issue" --verbose
   rakitsu run agent.yaml "Build app" --hub http://myhost:9100
   rakitsu run agent.yaml "Quick test" --no-hub
   rakitsu run agent.yaml "Debug" --debug-port 9200
-  rakitsu run agent.yaml "Query" --provider litellm --model gpt-4o
-
-Flags:
-  --hub URL        SSE hub URL (default http://localhost:9100)
-  --no-hub         Disable hub connection entirely
-  --debug-port N   Start standalone debug server on port N
-  --provider NAME  Override default provider for all agents (e.g. litellm, ollama)
-  --model NAME     Override default model for all agents
-  --trace          Show real-time color-coded execution trace on stderr
-  --timeout N      Total execution timeout in seconds (default 300; <=0 disables)
-  --idle-timeout N Cancel if no streaming activity for N seconds (0=disabled)
-  --verbose        Print agent/model info before execution`,
+  rakitsu run agent.yaml "Query" --provider litellm --model gpt-4o`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runAgent,
 }
