@@ -41,8 +41,9 @@ Features:
   • Pipeline and hierarchical orchestration strategies
 
 Quick start:
+  rakitsu run --interactive                 Chat right now — no config needed
   rakitsu run agent.yaml "your query"       Run a single agent
-  rakitsu run agent.yaml --interactive      Chat interactively instead of one-shot
+  rakitsu run agent.yaml --interactive      Chat interactively with your own config
   rakitsu scaffold <use-case>               Generate a config from a use-case preset
   rakitsu quickstart                        Interactive wizard — no YAML needed
   rakitsu serve                             Start the web UI + monitoring hub

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -40,6 +41,13 @@ var runCmd = &cobra.Command{
 	Long: `Run an agent with the specified YAML configuration file and query.
 The agent will execute using the ReAct loop, calling tools as needed.
 
+Config is optional with --interactive: with no config.yaml given, a minimal
+keyless (Ollama) chat config is created once at ~/.rakitsu/default-agent.yaml
+and reused on every later configless --interactive run — edit that file
+directly to add tools or switch provider. One-shot runs (no --interactive)
+still need an explicit config, since a single remaining argument would be
+ambiguous between a config path and a query.
+
 By default, the CLI auto-connects to a running SSE hub (rakitsu serve) at
 http://localhost:9100 to stream events for real-time monitoring. If no hub
 is running, the agent runs standalone — no overhead, no errors.
@@ -59,6 +67,7 @@ Standalone debug mode (--debug-port):
 
 Examples:
   rakitsu run agent.yaml "What pods are running?"
+  rakitsu run --interactive
   rakitsu run agent.yaml --interactive
   rakitsu run examples/single/01-chat/config.yaml "Hello!"
   rakitsu run agent.yaml "Analyze errors" --trace
@@ -67,7 +76,16 @@ Examples:
   rakitsu run agent.yaml "Quick test" --no-hub
   rakitsu run agent.yaml "Debug" --debug-port 9200
   rakitsu run agent.yaml "Query" --provider litellm --model gpt-4o`,
-	Args: cobra.MinimumNArgs(1),
+	// Zero args is only valid combined with --interactive (falls back to the
+	// auto-bootstrapped default config, see ensureDefaultConfig) — one-shot
+	// mode still needs an explicit config, cobra has already parsed flags by
+	// the time Args runs so interactiveFlag reflects the actual invocation.
+	Args: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 && interactiveFlag {
+			return nil
+		}
+		return cobra.MinimumNArgs(1)(cmd, args)
+	},
 	RunE: runAgent,
 }
 
@@ -183,11 +201,102 @@ func startIdleWatchdog(ctx context.Context, bus *telemetry.EventBus, idle time.D
 	}()
 }
 
+// defaultConfigPath returns the location of the auto-bootstrapped configless
+// --interactive config. Same os.UserHomeDir()+filepath.Join(home, ".rakitsu",
+// ...) pattern already used for the session store and memory dir (see
+// internal/store/store.go, internal/memory/memory.go) — no new shared helper,
+// just matching how this repo already does it in two other places.
+func defaultConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".rakitsu", "default-agent.yaml"), nil
+}
+
+// ensureDefaultConfig writes a minimal, keyless (Ollama) chat config to path
+// if nothing exists there yet. Never overwrites an existing file — once
+// created, it's a real file the user can edit (add tools, switch provider),
+// not something regenerated on every run.
+func ensureDefaultConfig(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	const defaultConfigYAML = `# Auto-created by 'rakitsu run --interactive' the first time it ran with no
+# config given. Edit freely — add tools, switch provider — this file is
+# yours now and won't be regenerated. For something more capable to start
+# from instead, see 'rakitsu scaffold --list' or 'rakitsu quickstart'.
+#
+# Runs keyless against local Ollama by default (https://ollama.com):
+#   ollama pull llama3.1:8b
+# Prefer a cloud model? Uncomment a provider under settings.providers below.
+
+name: Default Assistant
+version: "1.0"
+description: Minimal conversational assistant — no tools, no orchestration.
+interactive: true
+
+settings:
+  default_provider: ollama
+  providers:
+    ollama:
+      type: ollama
+      base_url: http://localhost:11434/v1
+    # Alternatives — uncomment one and set default_provider + defaults.model above:
+    # openai:
+    #   type: openai
+    #   api_key: ${OPENAI_API_KEY}
+    # anthropic:
+    #   type: anthropic
+    #   api_key: ${ANTHROPIC_API_KEY}
+    # litellm:
+    #   type: litellm
+    #   api_key: ${LITELLM_API_KEY:-not-needed}
+    #   base_url: ${LITELLM_BASE_URL:-http://localhost:4000}
+  defaults:
+    model: llama3.1:8b
+    temperature: 0.7
+    max_tokens: 2048
+
+agents:
+  - name: Assistant
+    role: worker
+    system_prompt: |
+      You are a helpful, friendly assistant. Answer questions clearly and concisely.
+      If you don't know something, say so honestly.
+    settings:
+      max_iterations: 1
+`
+	return os.WriteFile(path, []byte(defaultConfigYAML), 0o644)
+}
+
 func runAgent(cmd *cobra.Command, args []string) (runErr error) {
-	configPath := args[0]
+	var configPath string
 	query := ""
-	if len(args) >= 2 {
-		query = args[1]
+	if len(args) == 0 {
+		// Only reachable when --interactive is set — runCmd.Args already
+		// enforced that. Bootstraps once, reused (not regenerated) on every
+		// later configless run so a user's edits to it stick.
+		path, err := defaultConfigPath()
+		if err != nil {
+			return fmt.Errorf("cannot determine default config path: %w", err)
+		}
+		if err := ensureDefaultConfig(path); err != nil {
+			return fmt.Errorf("cannot create default config at %s: %w", path, err)
+		}
+		fmt.Printf("No config given — using the default at %s (edit it directly, or run "+
+			"'rakitsu scaffold'/'rakitsu quickstart' for something more capable).\n", path)
+		configPath = path
+	} else {
+		configPath = args[0]
+		if len(args) >= 2 {
+			query = args[1]
+		}
 	}
 
 	// Load configuration
