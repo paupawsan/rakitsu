@@ -1,0 +1,113 @@
+# Cuts a GitHub Release from a `v*` tag: builds all platform binaries and
+# generates checksums.txt in the exact shape install.sh expects, and
+# uploads both plus a changelog to the release.
+#
+# A tag push doesn't trigger ci.yml (it only watches branches: [main]), so
+# this workflow runs its own build+test+vet gate rather than relying on
+# main's CI having already covered the exact commit a tag points at.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # only this job needs to create the release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0 # full history, for the changelog step below
+          persist-credentials: false
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: 'go.mod'
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '20'
+
+      # npm ci (not `make frontend`'s npm install) so the release build uses
+      # the exact locked, audited dependency tree ci.yml already verified -
+      # the artifact users download and run is the one place this matters
+      # most.
+      - name: Install frontend deps
+        run: cd web && npm ci
+
+      - name: Audit npm dependencies
+        run: cd web && npm audit --audit-level=high --omit=dev
+
+      - name: Build frontend
+        run: cd web && npm run build
+
+      - name: Embed frontend
+        run: make embed-frontend
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Go tests
+        run: go test ./...
+
+      - name: Build all platforms
+        env:
+          # Passed through env, not interpolated into the script directly -
+          # a tag name reaches this workflow as untrusted input as far as
+          # the runner's ${{ }} template expansion is concerned, and env
+          # vars aren't re-parsed as shell source the way a raw ${{ }}
+          # substitution into `run:` would be.
+          VERSION: ${{ github.ref_name }}
+        run: |
+          mkdir -p bin
+          GOOS=linux   GOARCH=amd64 go build -ldflags "-X main.Version=$VERSION" -o bin/rakitsu-linux-amd64     ./cmd/rakitsu
+          GOOS=linux   GOARCH=arm64 go build -ldflags "-X main.Version=$VERSION" -o bin/rakitsu-linux-arm64     ./cmd/rakitsu
+          GOOS=darwin  GOARCH=amd64 go build -ldflags "-X main.Version=$VERSION" -o bin/rakitsu-darwin-amd64    ./cmd/rakitsu
+          GOOS=darwin  GOARCH=arm64 go build -ldflags "-X main.Version=$VERSION" -o bin/rakitsu-darwin-arm64    ./cmd/rakitsu
+          GOOS=windows GOARCH=amd64 go build -ldflags "-X main.Version=$VERSION" -o bin/rakitsu-windows-amd64.exe ./cmd/rakitsu
+
+      - name: Generate checksums
+        run: |
+          cd bin
+          sha256sum rakitsu-* > checksums.txt
+          cat checksums.txt
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Walks ancestry from the tag being released, rather than sorting
+          # the whole tag list by creatordate: that approach picks the
+          # current tag itself when a non-release tag (e.g. "nightly") also
+          # points at HEAD, and mis-orders lightweight tags (creatordate
+          # falls back to the commit's date, not the tag's).
+          PREV_TAG=$(git describe --tags --abbrev=0 --match='v*' HEAD^ 2>/dev/null || true)
+          if [ -z "$PREV_TAG" ]; then
+            echo "body=Initial release" >> "$GITHUB_OUTPUT"
+          else
+            LOG=$(git log --pretty=format:"- %s" "${PREV_TAG}..HEAD")
+            {
+              echo "body<<EOF"
+              echo "$LOG"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          body: ${{ steps.changelog.outputs.body }}
+          files: |
+            bin/rakitsu-linux-amd64
+            bin/rakitsu-linux-arm64
+            bin/rakitsu-darwin-amd64
+            bin/rakitsu-darwin-arm64
+            bin/rakitsu-windows-amd64.exe
+            bin/checksums.txt
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
