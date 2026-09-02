@@ -94,9 +94,13 @@ The same token also satisfies cross-session messaging
 - The **web UI over the network is not supported yet**: the browser cannot
   attach the bearer token to page navigations, so use an SSH tunnel to reach
   the UI remotely, or call the API directly with the token.
-- The **MCP (`/mcp`) and A2A (`/a2a`) endpoints are not individually
-  token-gated.** The non-loopback bind refusal is the backstop — keep them
-  behind a tunnel or a trusted network.
+- The **MCP (`/mcp`) and A2A (`/a2a`) endpoints require the same bearer
+  token as everything else** (`requiresAuth` in `internal/server/auth.go`
+  matches both by path). The Agent Card discovery route
+  (`/.well-known/agent-card.json`) is deliberately left open — the A2A spec
+  expects it to be publicly fetchable so a client can learn what auth is
+  required before authenticating. The non-loopback bind refusal remains the
+  backstop for all of it — keep it behind a tunnel or a trusted network.
 - WebSocket upgrades are restricted to localhost/same-origin (so a random web
   page cannot drive your agent), but there is no CSRF token on same-origin
   POSTs yet.

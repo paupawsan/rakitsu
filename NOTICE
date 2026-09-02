@@ -55,6 +55,13 @@ code vendored or shared, this is a from-scratch Go implementation):
   internal/acp/'s server implements this JSON-RPC-over-stdio protocol,
   checked against the published schema.
 
+- Agent2Agent Protocol (A2A) — the A2A Project (multi-vendor governed;
+  Apache License 2.0).
+  https://github.com/a2aproject/A2A
+  cmd/rakitsu/a2a_serve.go and internal/tools/a2a/ implement this
+  JSON-RPC-over-HTTP protocol (schema v1.0.1), checked against the
+  published specification.
+
 ---
 
 The Business Source License is a trademark of MariaDB Corporation Ab.
