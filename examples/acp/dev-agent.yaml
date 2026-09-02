@@ -1,0 +1,107 @@
+# ACP dev-agent config — read/write/list/search + a sandboxed shell, wired
+# for use as an external agent inside an ACP client (Zed, or any other editor
+# that speaks the Agent Client Protocol).
+#
+# Usage (Zed's settings.json):
+#   "agent_servers": {
+#     "rakitsu": {
+#       "type": "custom",
+#       "command": "/path/to/rakitsu",
+#       "args": ["acp", "/path/to/examples/acp/dev-agent.yaml"],
+#       "env": {
+#         "LITELLM_API_KEY": "...",
+#         "LITELLM_BASE_URL": "..."
+#       }
+#     }
+#   }
+#
+# Then run: rakitsu acp examples/acp/dev-agent.yaml
+# (a client launches this itself over stdio — you won't normally run it by hand)
+
+name: ACP Dev Agent
+version: "1.0"
+description: Coding agent with read/write/list/search/cli tools, for use as an ACP agent server in an editor.
+
+settings:
+  default_provider: litellm
+  providers:
+    litellm:
+      type: litellm
+      api_key: ${LITELLM_API_KEY:-not-needed}
+      base_url: ${LITELLM_BASE_URL:-http://localhost:4000}
+  defaults:
+    model: openai/gpt-5-nano
+    max_tokens: 4096
+  execution:
+    max_iterations: 8
+    timeout_seconds: 300
+  allowed_commands:
+    - go
+    - python3
+    - node
+    - npm
+    - make
+    - git
+    - find
+    - grep
+    - cat
+    - ls
+
+tools:
+  - name: read-file
+    type: fs
+    operation: read
+    allowed_paths: ["."]
+    description: Read file contents
+    parameters:
+      path: { type: string, description: "File path to read", required: true }
+
+  - name: write-file
+    type: fs
+    operation: write
+    allowed_paths: ["."]
+    description: Write or overwrite a file
+    parameters:
+      path: { type: string, description: "File path to write", required: true }
+      content: { type: string, description: "File content", required: true }
+
+  - name: list-files
+    type: fs
+    operation: list
+    allowed_paths: ["."]
+    description: List files in a directory
+    parameters:
+      path: { type: string, description: "Directory path to list", required: true }
+
+  - name: search-files
+    type: fs
+    operation: search
+    allowed_paths: ["."]
+    description: Search for text patterns across files
+    parameters:
+      pattern: { type: string, description: "Search pattern (regex)", required: true }
+      path: { type: string, description: "Directory to search in", required: true }
+
+  - name: run-command
+    type: cli
+    description: Execute a shell command (restricted to allowed_commands)
+    command: "sh -c '{{command}}'"
+    parameters:
+      command: { type: string, description: "Shell command to execute", required: true }
+    sandbox:
+      type: local_restricted
+      resource_limits:
+        timeout_sec: 30
+
+agents:
+  - name: assistant
+    role: worker
+    system_prompt: |
+      You are a coding assistant running on Rakitsu, an agent orchestration
+      runtime, invoked here from a code editor via the Agent Client Protocol
+      (ACP). If asked what you are, say you're a Rakitsu agent, not any other
+      product. Help with reading, writing, and editing code, and running
+      commands (build, test, git) as needed. Be direct and concise — this is
+      a live coding session, not a report.
+    tools: [read-file, write-file, list-files, search-files, run-command]
+    settings: { max_iterations: 8 }
