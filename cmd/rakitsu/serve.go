@@ -165,8 +165,12 @@ func startServe() {
 			}()
 		}
 
-		mux.Handle("/a2a", a2aHandlerFunc(serveCfg, eventBus))
+		mux.Handle("/a2a", a2aHandlerFunc(serveCfg, func(ctx context.Context, cfg *config.Config, query string) (string, error) {
+			return executeConfig(ctx, cfg, eventBus, nil, query, nil)
+		}))
+		mux.Handle("/.well-known/agent-card.json", agentCardHandlerFunc(serveCfg, fmt.Sprintf("http://%s/a2a", addr)))
 		log.Printf("A2A endpoint ready at http://%s/a2a", addr)
+		log.Printf("A2A agent card at http://%s/.well-known/agent-card.json", addr)
 	}
 
 	srv := &http.Server{
