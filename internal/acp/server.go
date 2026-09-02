@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -63,40 +64,71 @@ type acpError struct {
 
 // ─── Server ───────────────────────────────────────────────────────────────────
 
-// sessionGracePeriod is how long a completed/failed/cancelled session stays
-// in the registry before being removed. Without it, the deferred delete in
-// handleRun's run goroutine races an agent/status poll that a client sends
-// right after observing the agent/complete notification — the two happen
-// microseconds apart, and the poll loses that race far more often than not.
-const sessionGracePeriod = 30 * time.Second
+// protocolVersion is ACP's PROTOCOL_VERSION — a plain integer, not a semver
+// string. Verified against @zed-industries/agent-client-protocol@0.4.5's
+// dist/schema.d.ts (the human-readable docs site paraphrase got this wrong).
+const protocolVersion = 1
+
+// defaultPromptTimeout bounds how long a single session/prompt turn may run
+// when the pinned config leaves settings.execution.timeout_seconds unset.
+// Real ACP's PromptRequest carries no timeout field (unlike the old
+// agent/run's timeout_sec), so this is a fixed server-side default rather
+// than a per-request client override — but a configured value still wins,
+// see promptTimeout below.
+const defaultPromptTimeout = 300 * time.Second
+
+// promptTimeout resolves the duration that bounds one session/prompt turn.
+// Mirrors cmd/rakitsu/run.go's resolveTimeoutSeconds precedence for
+// settings.execution.timeout_seconds — this is the same config field, and
+// cmd/rakitsu/acp.go's help text promises a session runs the pinned config
+// "the same way" rakitsu run does, so the two must agree: 0 (unset) falls
+// back to defaultPromptTimeout, a positive value is used as-is, and a
+// negative value means no timeout at all (ok=false — the caller must not
+// apply a deadline).
+func promptTimeout(cfg *config.Config) (d time.Duration, ok bool) {
+	switch sec := cfg.Settings.Execution.TimeoutSeconds; {
+	case sec == 0:
+		return defaultPromptTimeout, true
+	case sec < 0:
+		return 0, false
+	default:
+		return time.Duration(sec) * time.Second, true
+	}
+}
 
 // Server is the ACP stdio server. It reads JSON-RPC requests from in,
 // executes agent pipelines via runFunc, and writes JSON-RPC responses/
-// notifications to out.
+// notifications to out. cfg is the single config pinned at process startup
+// (see cmd/rakitsu/acp.go) — real ACP's session/new has no config-path field,
+// so every session this process serves runs against the same cfg.
 type Server struct {
 	runFunc  RunFunc
+	cfg      *config.Config
 	in       io.Reader
 	out      io.Writer
 	mu       sync.Mutex // protects writes to out
 	sessions *sessionMap
-	wg       sync.WaitGroup // tracks all in-flight dispatch + agent/run work
+	wg       sync.WaitGroup // tracks all in-flight dispatch work
 
 	shutdownMu sync.Mutex // guards stopped, serializing it against wg.Add in the reader loop
 	stopped    bool       // set before wg.Wait(); see Run's comment
 }
 
-// NewServer creates an ACP server that reads from os.Stdin and writes to os.Stdout.
+// NewServer creates an ACP server that reads from os.Stdin and writes to
+// os.Stdout, running every session against cfg.
 // Use NewServerWithIO for testing.
-func NewServer(runFunc RunFunc) *Server {
+func NewServer(cfg *config.Config, runFunc RunFunc) *Server {
 	return &Server{
+		cfg:      cfg,
 		runFunc:  runFunc,
 		sessions: newSessionMap(),
 	}
 }
 
 // NewServerWithIO creates an ACP server with injected I/O (for testing).
-func NewServerWithIO(runFunc RunFunc, in io.Reader, out io.Writer) *Server {
+func NewServerWithIO(cfg *config.Config, runFunc RunFunc, in io.Reader, out io.Writer) *Server {
 	return &Server{
+		cfg:      cfg,
 		runFunc:  runFunc,
 		in:       in,
 		out:      out,
@@ -106,8 +138,9 @@ func NewServerWithIO(runFunc RunFunc, in io.Reader, out io.Writer) *Server {
 
 // Run blocks, reading newline-delimited JSON-RPC requests until in is closed
 // or ctx is cancelled. It returns only once every request dispatched before
-// shutdown — including the background agent/run goroutines that outlive
-// their initial dispatch — has actually finished, so a caller can safely
+// shutdown — including in-flight session/prompt turns, which now run
+// synchronously inside their own dispatch goroutine rather than spawning a
+// second tracked goroutine — has actually finished, so a caller can safely
 // treat Run returning as "safe to shut down." No new request is dispatched
 // once shutdown begins.
 func (s *Server) Run(ctx context.Context, in io.Reader, out io.Writer) error {
@@ -124,11 +157,11 @@ func (s *Server) Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	go func() {
 		// bufio.Reader.ReadString has no fixed per-line size ceiling, unlike
 		// the bufio.Scanner + fixed buffer this replaces: a single line over
-		// that buffer's size (plausible for agent/run's query field, which
-		// could carry a pasted diff) made Scan() return false permanently
-		// with bufio.ErrTooLong — Scanner cannot recover after that, so the
-		// loop exited and Run returned silently, dropping every subsequent
-		// request for the life of the process.
+		// that buffer's size (plausible for session/prompt's prompt field,
+		// which could carry a pasted diff) made Scan() return false
+		// permanently with bufio.ErrTooLong — Scanner cannot recover after
+		// that, so the loop exited and Run returned silently, dropping every
+		// subsequent request for the life of the process.
 		reader := bufio.NewReader(s.in)
 		for {
 			line, err := reader.ReadString('\n')
@@ -189,9 +222,9 @@ func (s *Server) Run(ctx context.Context, in io.Reader, out io.Writer) error {
 	s.stopped = true
 	s.shutdownMu.Unlock()
 
-	// Wait for every request dispatched before shutdown (including
-	// agent/run's background goroutine, which registers its own
-	// s.wg.Add(1) — see handleRun) to actually finish before returning.
+	// Wait for every request dispatched before shutdown — including an
+	// in-flight session/prompt turn, which runs inline inside dispatch now —
+	// to actually finish before returning.
 	s.wg.Wait()
 	return runErr
 }
@@ -211,12 +244,12 @@ func (s *Server) dispatch(ctx context.Context, req acpRequest) {
 	switch req.Method {
 	case "initialize":
 		s.handleInitialize(req)
-	case "agent/run":
-		s.handleRun(ctx, req)
-	case "agent/cancel":
+	case "session/new":
+		s.handleNewSession(req)
+	case "session/prompt":
+		s.handlePrompt(ctx, req)
+	case "session/cancel":
 		s.handleCancel(req)
-	case "agent/status":
-		s.handleStatus(req)
 	default:
 		s.writeError(req.ID, -32601, fmt.Sprintf("method not found: %q", req.Method))
 	}
@@ -225,231 +258,401 @@ func (s *Server) dispatch(ctx context.Context, req acpRequest) {
 // ─── initialize ───────────────────────────────────────────────────────────────
 
 type initializeResult struct {
-	ProtocolVersion string     `json:"protocol_version"`
-	ServerInfo      serverInfo `json:"server_info"`
-	Capabilities    caps       `json:"capabilities"`
+	ProtocolVersion   int               `json:"protocolVersion"`
+	AgentCapabilities agentCapabilities `json:"agentCapabilities"`
+	AuthMethods       []authMethod      `json:"authMethods"`
 }
 
-type serverInfo struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
+// agentCapabilities is returned all-zero/false in v1: no session resumption
+// (loadSession), no non-text prompt content, no MCP-server forwarding.
+type agentCapabilities struct {
+	LoadSession        bool               `json:"loadSession"`
+	PromptCapabilities promptCapabilities `json:"promptCapabilities"`
+	McpCapabilities    mcpCapabilities    `json:"mcpCapabilities"`
 }
 
-type caps struct {
-	Streaming bool `json:"streaming"`
-	Cancel    bool `json:"cancel"`
-	Status    bool `json:"status"`
+type promptCapabilities struct {
+	Image           bool `json:"image"`
+	Audio           bool `json:"audio"`
+	EmbeddedContext bool `json:"embeddedContext"`
+}
+
+type mcpCapabilities struct {
+	HTTP bool `json:"http"`
+	SSE  bool `json:"sse"`
+}
+
+type authMethod struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
 }
 
 func (s *Server) handleInitialize(req acpRequest) {
 	s.writeResponse(req.ID, initializeResult{
-		ProtocolVersion: "0.1",
-		ServerInfo:      serverInfo{Name: "rakitsu", Version: "0.1.0"},
-		Capabilities:    caps{Streaming: true, Cancel: true, Status: true},
+		ProtocolVersion:   protocolVersion,
+		AgentCapabilities: agentCapabilities{},
+		AuthMethods:       []authMethod{}, // no auth for a local stdio agent
 	})
 }
 
-// ─── agent/run ────────────────────────────────────────────────────────────────
+// ─── session/new ────────────────────────────────────────────────────────────
 
-type runParams struct {
-	ConfigPath string `json:"config_path"`
-	Query      string `json:"query"`
-	TimeoutSec int    `json:"timeout_sec"`
+// newSessionParams mirrors real ACP's NewSessionRequest. cwd and mcpServers
+// are accepted (required by the client-side schema) but not used in v1 —
+// rakitsu's tool set and working directory come from the config pinned at
+// server startup (cmd/rakitsu/acp.go), not from the session.
+type newSessionParams struct {
+	CWD        string            `json:"cwd"`
+	MCPServers []json.RawMessage `json:"mcpServers"`
 }
 
-type runResult struct {
-	SessionID string `json:"session_id"`
+type newSessionResult struct {
+	SessionID string `json:"sessionId"`
 }
 
-type eventNotificationParams struct {
-	SessionID string               `json:"session_id"`
-	Event     telemetry.AgentEvent `json:"event"`
-}
-
-type completeNotificationParams struct {
-	SessionID string `json:"session_id"`
-	Result    string `json:"result,omitempty"`
-	Error     string `json:"error,omitempty"`
-}
-
-func (s *Server) handleRun(ctx context.Context, req acpRequest) {
-	var params runParams
+func (s *Server) handleNewSession(req acpRequest) {
+	var params newSessionParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		s.writeError(req.ID, -32602, "invalid params: "+err.Error())
 		return
 	}
-	if params.ConfigPath == "" {
-		s.writeError(req.ID, -32602, "config_path is required")
-		return
+	// Silently ignoring these could mean opening project B in the client
+	// while the pinned config's fs tools resolve against project A, with
+	// nothing in the transcript hinting at the mismatch — logging at least
+	// makes it diagnosable.
+	if params.CWD != "" {
+		fmt.Fprintf(os.Stderr, "rakitsu acp: session/new cwd %q ignored — file access follows the config pinned at startup, not the session\n", params.CWD)
 	}
-	if params.Query == "" {
-		s.writeError(req.ID, -32602, "query is required")
-		return
-	}
-
-	cfg, err := config.Load(params.ConfigPath)
-	if err != nil {
-		s.writeError(req.ID, -32603, "load config: "+err.Error())
-		return
+	if len(params.MCPServers) > 0 {
+		fmt.Fprintf(os.Stderr, "rakitsu acp: session/new mcpServers (%d) ignored — client-supplied MCP servers aren't wired in v1; use the config's own tools: mcp_server entries instead\n", len(params.MCPServers))
 	}
 
-	timeoutSec := params.TimeoutSec
-	if timeoutSec <= 0 {
-		timeoutSec = 300
-	}
-
-	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 	sessionID := uuid.New().String()
-	sess := newSession(sessionID, cancel)
-	s.sessions.add(sess)
-
-	// Respond immediately with the session ID before execution starts.
-	s.writeResponse(req.ID, runResult{SessionID: sessionID})
-
-	// Run the agent pipeline in a goroutine, streaming events as notifications.
-	// Registered on s.wg so Run() doesn't return while this is still in
-	// flight — see Run's comment on why the outer dispatch goroutine alone
-	// isn't enough to track this. Unlike the reader loop's Add, this one
-	// doesn't need its own shutdownMu check: it only runs from inside the
-	// dispatch goroutine the reader loop already registered, so the
-	// WaitGroup counter is guaranteed above zero for the whole duration of
-	// this call — the Add-after-Wait race that guard exists for can't happen
-	// here. That invariant depends on dispatch always being reached through
-	// the reader loop's guarded Add, so keep it that way if this ever changes.
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		defer cancel()
-		// A grace period, not an immediate delete: a client polling
-		// agent/status right after observing agent/complete would otherwise
-		// race this delete by microseconds and almost always lose.
-		defer time.AfterFunc(sessionGracePeriod, func() { s.sessions.delete(sessionID) })
-
-		eventBus := telemetry.NewEventBus(1024)
-		eventCh := eventBus.Subscribe()
-
-		// Drain events → agent/event notifications. drainDone signals once
-		// the range loop has finished flushing everything Unsubscribe's
-		// channel-close left buffered, so agent/complete is only written
-		// after the client has already seen every agent/event that causally
-		// preceded it — on BOTH the normal and panic paths below.
-		drainDone := make(chan struct{})
-		go func() {
-			defer close(drainDone)
-			for event := range eventCh {
-				s.writeNotification("agent/event", eventNotificationParams{
-					SessionID: sessionID,
-					Event:     event,
-				})
-			}
-		}()
-		var cleanupEventsOnce sync.Once
-		cleanupEvents := func() {
-			cleanupEventsOnce.Do(func() {
-				eventBus.Unsubscribe(eventCh)
-				<-drainDone
-			})
-		}
-
-		// Any panic in s.runFunc — the full agent/orchestrator/provider/tool
-		// execution stack — must not escape this goroutine: unrecovered, it
-		// would crash the whole ACP process, taking down every other
-		// concurrently-running session on the same stdio connection.
-		// internal/server/runner.go guards the same RunFunc call point the
-		// same way. cleanupEvents is called explicitly here rather than left
-		// to a defer at this call site: a plain defer registered before
-		// s.runFunc would run AFTER this recover defer during panic unwind
-		// (defers unwind LIFO — this one, registered first, runs last), so
-		// agent/complete below would be written before the drain finished
-		// flushing every preceding agent/event, breaking the very ordering
-		// this cleanup exists to guarantee. Calling it explicitly, exactly
-		// where the cleanup needs to happen relative to each notification
-		// write, is what the sync.Once above is for (idempotent).
-		defer func() {
-			if p := recover(); p != nil {
-				cleanupEvents()
-				msg := fmt.Sprintf("agent panic: %v", p)
-				sess.fail(msg)
-				s.writeNotification("agent/complete", completeNotificationParams{
-					SessionID: sessionID,
-					Error:     msg,
-				})
-			}
-		}()
-
-		result, runErr := s.runFunc(runCtx, cfg, eventBus, nil, params.Query, nil)
-
-		cleanupEvents()
-
-		if runErr != nil {
-			sess.fail(runErr.Error())
-			s.writeNotification("agent/complete", completeNotificationParams{
-				SessionID: sessionID,
-				Error:     runErr.Error(),
-			})
-		} else {
-			sess.complete(result)
-			s.writeNotification("agent/complete", completeNotificationParams{
-				SessionID: sessionID,
-				Result:    result,
-			})
-		}
-	}()
+	s.sessions.add(newSession(sessionID))
+	s.writeResponse(req.ID, newSessionResult{SessionID: sessionID})
 }
 
-// ─── agent/cancel ─────────────────────────────────────────────────────────────
+// ─── session/prompt ───────────────────────────────────────────────────────────
 
+// contentBlock is a (deliberately partial) ACP ContentBlock. v1 only reads
+// Type and Text — every other field (data/mimeType/uri/resource/...) is
+// unused because a non-"text" block is rejected before those fields would
+// matter (see handlePrompt).
+type contentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
+}
+
+type promptParams struct {
+	SessionID string         `json:"sessionId"`
+	Prompt    []contentBlock `json:"prompt"`
+}
+
+type promptResult struct {
+	StopReason string `json:"stopReason"`
+}
+
+// sessionUpdateParams is the session/update notification envelope. Update
+// holds one of the sessionUpdate-discriminated payload structs below.
+type sessionUpdateParams struct {
+	SessionID string      `json:"sessionId"`
+	Update    interface{} `json:"update"`
+}
+
+func (s *Server) handlePrompt(ctx context.Context, req acpRequest) {
+	var params promptParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		s.writeError(req.ID, -32602, "invalid params: "+err.Error())
+		return
+	}
+	if params.SessionID == "" {
+		s.writeError(req.ID, -32602, "sessionId is required")
+		return
+	}
+	if len(params.Prompt) == 0 {
+		s.writeError(req.ID, -32602, "prompt is required")
+		return
+	}
+
+	sess, ok := s.sessions.get(params.SessionID)
+	if !ok {
+		s.writeError(req.ID, -32001, "session not found: "+params.SessionID)
+		return
+	}
+
+	textParts := make([]string, 0, len(params.Prompt))
+	for _, block := range params.Prompt {
+		if block.Type != "text" {
+			s.writeError(req.ID, -32602, fmt.Sprintf(
+				"unsupported content block type %q: only \"text\" is supported in this version", block.Type))
+			return
+		}
+		textParts = append(textParts, block.Text)
+	}
+	query := strings.Join(textParts, "\n\n")
+	composedQuery := sess.composeQuery(query)
+
+	var runCtx context.Context
+	var cancel context.CancelFunc
+	if d, hasTimeout := promptTimeout(s.cfg); hasTimeout {
+		runCtx, cancel = context.WithTimeout(ctx, d)
+	} else {
+		runCtx, cancel = context.WithCancel(ctx)
+	}
+	if !sess.startTurn(cancel) {
+		cancel()
+		s.writeError(req.ID, -32000, "session busy: a session/prompt turn is already in flight for session "+params.SessionID)
+		return
+	}
+
+	eventBus := telemetry.NewEventBus(1024)
+	eventCh := eventBus.Subscribe()
+
+	// sawMessageChunk tracks whether any agent_message_chunk notification
+	// was actually sent during this turn. Only the drain goroutine below
+	// writes it; cleanupEvents's <-drainDone (called before result is used
+	// below) establishes a happens-before edge, so reading it afterward
+	// needs no atomic/lock of its own.
+	sawMessageChunk := false
+
+	// Drain events → session/update notifications. drainDone signals once
+	// the range loop has finished flushing everything Unsubscribe's
+	// channel-close left buffered, so the final response is only written
+	// after the client has already seen every session/update that causally
+	// preceded it — on BOTH the normal and panic paths below.
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		for event := range eventCh {
+			if update, ok := sessionUpdateFromEvent(event); ok {
+				if event.EventType == telemetry.EventTokenChunk {
+					sawMessageChunk = true
+				}
+				s.writeNotification("session/update", sessionUpdateParams{
+					SessionID: params.SessionID,
+					Update:    update,
+				})
+			}
+		}
+	}()
+	var cleanupOnce sync.Once
+	cleanupEvents := func() {
+		cleanupOnce.Do(func() {
+			eventBus.Unsubscribe(eventCh)
+			<-drainDone
+		})
+	}
+
+	// Any panic in s.runFunc — the full agent/orchestrator/provider/tool
+	// execution stack — must not escape this call: unrecovered, it would
+	// crash the whole ACP process, taking down every other concurrently
+	// in-flight session on the same stdio connection. internal/server/runner.go
+	// guards the same RunFunc call point the same way. cleanupEvents is
+	// called explicitly here rather than left to a defer at this call site: a
+	// plain defer registered before s.runFunc would run AFTER this recover
+	// defer during panic unwind (defers unwind LIFO — this one, registered
+	// first, runs last), so the error response below would be written before
+	// the drain finished flushing every preceding session/update, breaking
+	// the very ordering this cleanup exists to guarantee.
+	defer func() {
+		if p := recover(); p != nil {
+			cleanupEvents()
+			cancel()
+			sess.endTurn()
+			sess.recordTurn(query, fmt.Sprintf("[error: agent panic: %v]", p))
+			s.writeError(req.ID, -32000, fmt.Sprintf("agent panic: %v", p))
+		}
+	}()
+
+	result, runErr := s.runFunc(runCtx, s.cfg, eventBus, nil, composedQuery, nil)
+
+	cleanupEvents()
+	cancel()
+	wasCancelled := sess.wasCancelled()
+	sess.endTurn()
+
+	switch {
+	case runErr != nil && wasCancelled:
+		// Cancellation isn't a failure — real ACP has no generic "error"
+		// StopReason, only this one for the cancel case.
+		sess.recordTurn(query, "[cancelled]")
+		s.writeResponse(req.ID, promptResult{StopReason: "cancelled"})
+	case runErr != nil:
+		// No StopReason value fits a generic failure — signal it as a
+		// request error instead, same as the panic-recovery path above.
+		sess.recordTurn(query, fmt.Sprintf("[error: %v]", runErr))
+		s.writeError(req.ID, -32000, runErr.Error())
+	default:
+		// v1 has no ACP field for the final answer text separate from the
+		// agent_message_chunk notifications already streamed during the run,
+		// so on the streaming path result is already fully surfaced and
+		// only needs recording into session history (composeQuery is the
+		// consumer, not the ACP response).
+		//
+		// But streaming isn't guaranteed: model_config.no_stream_tools with
+		// tools present, or any provider that isn't an llm.StreamingProvider,
+		// skips generateWithStreaming entirely — the only EventTokenChunk
+		// emit site — so sawMessageChunk is false and the client would
+		// otherwise see zero content. Emit result as one synthetic final
+		// chunk in that case; the streaming path never hits this, so
+		// nothing is ever duplicated.
+		if !sawMessageChunk && result != "" {
+			s.writeNotification("session/update", sessionUpdateParams{
+				SessionID: params.SessionID,
+				Update: agentMessageChunkUpdate{
+					SessionUpdate: "agent_message_chunk",
+					Content:       contentBlock{Type: "text", Text: result},
+				},
+			})
+		}
+		sess.recordTurn(query, result)
+		s.writeResponse(req.ID, promptResult{StopReason: "end_turn"})
+	}
+}
+
+// ─── session/cancel ───────────────────────────────────────────────────────────
+
+// session/cancel is a true JSON-RPC notification per the ACP spec: the
+// client sends it with no "id" and expects no response, ever — not even an
+// error for an unknown session. handleCancel therefore never calls
+// writeResponse/writeError.
 type cancelParams struct {
-	SessionID string `json:"session_id"`
+	SessionID string `json:"sessionId"`
 }
 
 func (s *Server) handleCancel(req acpRequest) {
 	var params cancelParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		s.writeError(req.ID, -32602, "invalid params: "+err.Error())
 		return
 	}
-	sess, ok := s.sessions.get(params.SessionID)
-	if !ok {
-		s.writeError(req.ID, -32001, "session not found: "+params.SessionID)
-		return
+	if sess, ok := s.sessions.get(params.SessionID); ok {
+		sess.requestCancel()
 	}
-	sess.cancel()
-	sess.cancelled()
-	s.writeResponse(req.ID, struct{}{})
 }
 
-// ─── agent/status ─────────────────────────────────────────────────────────────
+// ─── event → session/update mapping ────────────────────────────────────────────
 
-type statusParams struct {
-	SessionID string `json:"session_id"`
+// toolCallPayload backs both the "tool_call" and "tool_call_update"
+// sessionUpdate variants, which share the same field set in the ACP schema
+// (tool_call requires Title; tool_call_update leaves everything but
+// ToolCallID optional — omitempty covers that difference here).
+type toolCallPayload struct {
+	SessionUpdate string                 `json:"sessionUpdate"`
+	ToolCallID    string                 `json:"toolCallId"`
+	Title         string                 `json:"title,omitempty"`
+	Status        string                 `json:"status,omitempty"`
+	RawInput      map[string]interface{} `json:"rawInput,omitempty"`
+	RawOutput     map[string]interface{} `json:"rawOutput,omitempty"`
 }
 
-type statusResult struct {
-	SessionID string `json:"session_id"`
-	Status    string `json:"status"`
-	Result    string `json:"result,omitempty"`
-	Error     string `json:"error,omitempty"`
+type agentMessageChunkUpdate struct {
+	SessionUpdate string       `json:"sessionUpdate"`
+	Content       contentBlock `json:"content"`
 }
 
-func (s *Server) handleStatus(req acpRequest) {
-	var params statusParams
-	if err := json.Unmarshal(req.Params, &params); err != nil {
-		s.writeError(req.ID, -32602, "invalid params: "+err.Error())
-		return
+type agentThoughtChunkUpdate struct {
+	SessionUpdate string       `json:"sessionUpdate"`
+	Content       contentBlock `json:"content"`
+}
+
+type planEntry struct {
+	Content  string `json:"content"`
+	Priority string `json:"priority"`
+	Status   string `json:"status"`
+}
+
+type planUpdate struct {
+	SessionUpdate string      `json:"sessionUpdate"`
+	Entries       []planEntry `json:"entries"`
+}
+
+// sessionUpdateFromEvent converts a rakitsu telemetry event into an ACP
+// session/update payload, following the same switch-on-EventType +
+// json.Unmarshal(event.Payload, &p) pattern already used in
+// internal/chat/bridge.go's convertEvent. ok is false for event types with
+// no ACP counterpart (the large majority — AGENT_START/END, ERROR,
+// REFLECTION_*, PIPELINE_*, DEBUG_*, MEMORY_*, etc.); those still reach the
+// regular telemetry/hub stream, just not the ACP client.
+func sessionUpdateFromEvent(event telemetry.AgentEvent) (interface{}, bool) {
+	switch event.EventType {
+	case telemetry.EventTokenChunk:
+		var p telemetry.TokenChunkPayload
+		if err := json.Unmarshal(event.Payload, &p); err != nil {
+			return nil, false
+		}
+		return agentMessageChunkUpdate{
+			SessionUpdate: "agent_message_chunk",
+			Content:       contentBlock{Type: "text", Text: p.Text},
+		}, true
+
+	case telemetry.EventReasoningChunk:
+		var p telemetry.ReasoningChunkPayload
+		if err := json.Unmarshal(event.Payload, &p); err != nil {
+			return nil, false
+		}
+		return agentThoughtChunkUpdate{
+			SessionUpdate: "agent_thought_chunk",
+			Content:       contentBlock{Type: "text", Text: p.Text},
+		}, true
+
+	case telemetry.EventToolCallStart:
+		var p telemetry.ToolCallStartPayload
+		if err := json.Unmarshal(event.Payload, &p); err != nil {
+			return nil, false
+		}
+		return toolCallPayload{
+			SessionUpdate: "tool_call",
+			ToolCallID:    p.ToolCallID,
+			Title:         p.ToolName,
+			Status:        "pending",
+			RawInput:      p.Arguments,
+		}, true
+
+	case telemetry.EventToolCallEnd:
+		var p telemetry.ToolCallEndPayload
+		if err := json.Unmarshal(event.Payload, &p); err != nil {
+			return nil, false
+		}
+		status := "completed"
+		if p.Error != "" {
+			status = "failed"
+		}
+		rawOutput := map[string]interface{}{"output": p.Output}
+		// ExitCode is meaningless for non-process tools (fs, mcp_server, a2a,
+		// memory) — the payload's own `omitempty` says as much, but that's
+		// lost once re-encoded into this map literal. A nonzero value is
+		// unambiguous evidence of a real process exit; zero is ambiguous
+		// (could be a genuine successful exit, or just "not a process"), so
+		// only include the key when it's unambiguous — avoids asserting
+		// "exited successfully" for a tool that never ran a process at all.
+		if p.ExitCode != 0 {
+			rawOutput["exitCode"] = p.ExitCode
+		}
+		return toolCallPayload{
+			SessionUpdate: "tool_call_update",
+			ToolCallID:    p.ToolCallID,
+			Status:        status,
+			RawOutput:     rawOutput,
+		}, true
+
+	case telemetry.EventThoughtEnd:
+		var p telemetry.ThoughtEndPayload
+		if err := json.Unmarshal(event.Payload, &p); err != nil {
+			return nil, false
+		}
+		if len(p.Plan) == 0 {
+			return nil, false
+		}
+		entries := make([]planEntry, len(p.Plan))
+		for i, line := range p.Plan {
+			entries[i] = planEntry{Content: line, Priority: "medium", Status: "pending"}
+		}
+		return planUpdate{SessionUpdate: "plan", Entries: entries}, true
+
+	default:
+		return nil, false
 	}
-	sess, ok := s.sessions.get(params.SessionID)
-	if !ok {
-		s.writeError(req.ID, -32001, "session not found: "+params.SessionID)
-		return
-	}
-	st, result, errMsg := sess.snapshot()
-	s.writeResponse(req.ID, statusResult{
-		SessionID: params.SessionID,
-		Status:    string(st),
-		Result:    result,
-		Error:     errMsg,
-	})
 }
 
 // ─── I/O helpers ──────────────────────────────────────────────────────────────

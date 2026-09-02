@@ -1,133 +1,205 @@
 package acp
 
-import "testing"
+import (
+	"fmt"
+	"strings"
+	"testing"
+	"unicode/utf8"
+)
 
-// Regression: agent/cancel sets status to "cancelled" via sess.cancelled(),
-// but the run goroutine's own error path calls sess.fail() shortly after
-// once it observes the cancelled context — without a sticky terminal state,
-// that overwrites "cancelled" back to "error" and a client polling
-// agent/status sees the wrong terminal state.
-
-func TestSession_CancelThenFail_StaysCancelled(t *testing.T) {
-	sess := newSession("s1", func() {})
-	sess.cancelled()
-	sess.fail("context canceled")
-
-	status, _, errMsg := sess.snapshot()
-	if status != statusCancelled {
-		t.Errorf("status = %q, want %q — fail() after cancelled() must be a no-op", status, statusCancelled)
+func TestSession_StartTurn_ArmsCancelAndClearsCancelled(t *testing.T) {
+	sess := newSession("s1")
+	sess.requestCancel() // mark cancelled with nothing in flight yet
+	if !sess.wasCancelled() {
+		t.Fatal("expected wasCancelled to be true after requestCancel")
 	}
-	if errMsg != "" {
-		t.Errorf("errMsg = %q, want empty — fail() after cancelled() must not record a message", errMsg)
+
+	sess.startTurn(func() {})
+	if sess.wasCancelled() {
+		t.Error("startTurn must clear a cancelled flag left over from before this turn")
 	}
 }
 
-func TestSession_CancelThenComplete_StaysCancelled(t *testing.T) {
-	sess := newSession("s1", func() {})
-	sess.cancelled()
-	sess.complete("some result")
+func TestSession_RequestCancel_CallsCurrentTurnsCancelFunc(t *testing.T) {
+	sess := newSession("s1")
+	called := false
+	sess.startTurn(func() { called = true })
 
-	status, result, _ := sess.snapshot()
-	if status != statusCancelled {
-		t.Errorf("status = %q, want %q — complete() after cancelled() must be a no-op", status, statusCancelled)
+	sess.requestCancel()
+
+	if !called {
+		t.Error("requestCancel must call the in-flight turn's cancel func")
 	}
-	if result != "" {
-		t.Errorf("result = %q, want empty", result)
-	}
-}
-
-// Regression, opposite ordering: complete()/fail() lands first, then a
-// late agent/cancel arrives before the session is removed from the
-// registry (handleRun's deferred delete only runs after the goroutine
-// already reported "agent/complete"). Without a guard on cancelled() too,
-// that overwrites the real outcome back to "cancelled" while result/errMsg
-// still hold the completed values — an internally inconsistent snapshot.
-
-func TestSession_CompleteThenCancelled_StaysCompleted(t *testing.T) {
-	sess := newSession("s1", func() {})
-	sess.complete("real result")
-	sess.cancelled()
-
-	status, result, _ := sess.snapshot()
-	if status != statusCompleted {
-		t.Errorf("status = %q, want %q — cancelled() after complete() must be a no-op", status, statusCompleted)
-	}
-	if result != "real result" {
-		t.Errorf("result = %q, want %q", result, "real result")
+	if !sess.wasCancelled() {
+		t.Error("requestCancel must mark the session cancelled")
 	}
 }
 
-func TestSession_FailThenCancelled_StaysError(t *testing.T) {
-	sess := newSession("s1", func() {})
-	sess.fail("boom")
-	sess.cancelled()
-
-	status, _, errMsg := sess.snapshot()
-	if status != statusError {
-		t.Errorf("status = %q, want %q — cancelled() after fail() must be a no-op", status, statusError)
-	}
-	if errMsg != "boom" {
-		t.Errorf("errMsg = %q, want %q", errMsg, "boom")
+func TestSession_RequestCancel_NoInFlightTurn_DoesNotPanic(t *testing.T) {
+	sess := newSession("s1")
+	sess.requestCancel() // no startTurn called yet — cancel func is nil
+	if !sess.wasCancelled() {
+		t.Error("requestCancel must still mark the session cancelled with no turn in flight")
 	}
 }
 
-// Sanity check the normal (non-cancelled) paths are unaffected by the guard.
+func TestSession_EndTurn_DisarmsCancelFunc(t *testing.T) {
+	sess := newSession("s1")
+	called := false
+	sess.startTurn(func() { called = true })
+	sess.endTurn()
 
-func TestSession_Fail_RecordsError(t *testing.T) {
-	sess := newSession("s1", func() {})
-	sess.fail("boom")
+	sess.requestCancel()
 
-	status, _, errMsg := sess.snapshot()
-	if status != statusError || errMsg != "boom" {
-		t.Errorf("snapshot = (%q, %q), want (%q, %q)", status, errMsg, statusError, "boom")
+	if called {
+		t.Error("requestCancel must not call a cancel func from a turn that already ended")
+	}
+	if !sess.wasCancelled() {
+		t.Error("requestCancel must still record the cancel attempt even with no turn in flight")
 	}
 }
 
-func TestSession_Complete_RecordsResult(t *testing.T) {
-	sess := newSession("s1", func() {})
-	sess.complete("done")
+func TestSession_StartTurn_Twice_OnlyArmsLatestCancelFunc(t *testing.T) {
+	sess := newSession("s1")
+	var firstCalled, secondCalled bool
+	sess.startTurn(func() { firstCalled = true })
+	sess.endTurn()
+	sess.startTurn(func() { secondCalled = true })
 
-	status, result, _ := sess.snapshot()
-	if status != statusCompleted || result != "done" {
-		t.Errorf("snapshot = (%q, %q), want (%q, %q)", status, result, statusCompleted, "done")
+	sess.requestCancel()
+
+	if firstCalled {
+		t.Error("requestCancel must not call a previous turn's cancel func")
+	}
+	if !secondCalled {
+		t.Error("requestCancel must call the current turn's cancel func")
 	}
 }
 
-// TestSession_CompleteThenFail_KeepsCompleted and its mirror below guard a
-// symmetry gap: complete() and fail() each now also refuse to overwrite the
-// OTHER terminal state, not just cancelled — matching cancelled()'s own
-// guard above, which already checked both.
-
-func TestSession_CompleteThenFail_KeepsCompleted(t *testing.T) {
-	s := newSession("s1", func() {})
-	s.complete("ok")
-	s.fail("should not override")
-
-	status, result, errMsg := s.snapshot()
-	if status != statusCompleted {
-		t.Errorf("want status %q, got %q", statusCompleted, status)
+func TestSession_StartTurn_RejectsWhenAlreadyInFlight(t *testing.T) {
+	sess := newSession("s1")
+	if !sess.startTurn(func() {}) {
+		t.Fatal("first startTurn on an idle session should succeed")
 	}
-	if result != "ok" {
-		t.Errorf("want result %q, got %q", "ok", result)
-	}
-	if errMsg != "" {
-		t.Errorf("want no error message, got %q", errMsg)
+	if sess.startTurn(func() {}) {
+		t.Error("startTurn should reject a second call while a turn is already in flight, not silently overwrite it")
 	}
 }
 
-func TestSession_FailThenComplete_KeepsError(t *testing.T) {
-	s := newSession("s1", func() {})
-	s.fail("boom")
-	s.complete("should not override")
+func TestSession_StartTurn_SucceedsAgainAfterEndTurn(t *testing.T) {
+	sess := newSession("s1")
+	sess.startTurn(func() {})
+	sess.endTurn()
+	if !sess.startTurn(func() {}) {
+		t.Error("startTurn should succeed again once the prior turn has ended")
+	}
+}
 
-	status, result, errMsg := s.snapshot()
-	if status != statusError {
-		t.Errorf("want status %q, got %q", statusError, status)
+func TestSession_ComposeQuery_NoHistoryReturnsQueryUnchanged(t *testing.T) {
+	sess := newSession("s1")
+	got := sess.composeQuery("hello")
+	if got != "hello" {
+		t.Errorf("got %q, want the query unchanged when there's no recorded history", got)
 	}
-	if errMsg != "boom" {
-		t.Errorf("want error message %q, got %q", "boom", errMsg)
+}
+
+func TestSession_ComposeQuery_IncludesPriorTurns(t *testing.T) {
+	sess := newSession("s1")
+	sess.recordTurn("first question", "first answer")
+	got := sess.composeQuery("second question")
+	if !strings.Contains(got, "first question") {
+		t.Errorf("composed query missing the prior question: %q", got)
 	}
-	if result != "" {
-		t.Errorf("want no result, got %q", result)
+	if !strings.Contains(got, "first answer") {
+		t.Errorf("composed query missing the prior answer: %q", got)
+	}
+	if !strings.Contains(got, "second question") {
+		t.Errorf("composed query missing the new question: %q", got)
+	}
+}
+
+func TestSession_ComposeQuery_TrimsToMaxTurns(t *testing.T) {
+	sess := newSession("s1")
+	for i := 0; i < historyMaxTurns+3; i++ {
+		sess.recordTurn(fmt.Sprintf("q%d", i), fmt.Sprintf("a%d", i))
+	}
+	got := sess.composeQuery("latest")
+	if strings.Contains(got, "q0") {
+		t.Error("oldest turn should have been trimmed out of the composed history")
+	}
+	if !strings.Contains(got, fmt.Sprintf("q%d", historyMaxTurns+2)) {
+		t.Error("most recent prior turn should still be present in the composed history")
+	}
+}
+
+func TestSession_RecordTurn_BoundsStorageNotJustComposeOutput(t *testing.T) {
+	sess := newSession("s1")
+	for i := 0; i < historyMaxTurns+3; i++ {
+		sess.recordTurn(fmt.Sprintf("q%d", i), fmt.Sprintf("a%d", i))
+	}
+
+	sess.mu.Lock()
+	got := len(sess.history)
+	sess.mu.Unlock()
+
+	if got != historyMaxTurns {
+		t.Errorf("stored history has %d turns, want it trimmed to historyMaxTurns (%d) at record time, not just at compose time", got, historyMaxTurns)
+	}
+}
+
+func TestSession_RecordTurn_TruncatesMultiByteResponseWithoutSplittingRunes(t *testing.T) {
+	sess := newSession("s1")
+	// Japanese text: 3 bytes/rune, well over historyMaxResponseChars runes,
+	// so a byte-index truncation is virtually certain to land mid-rune.
+	longResponse := strings.Repeat("こんにちは", historyMaxResponseChars) // "こんにちは" x N
+	sess.recordTurn("question", longResponse)
+
+	got := sess.composeQuery("next question")
+
+	if !utf8.ValidString(got) {
+		t.Fatal("composed query is not valid UTF-8 — response was truncated mid-rune")
+	}
+	if strings.ContainsRune(got, utf8.RuneError) {
+		t.Error("composed query contains U+FFFD, meaning the stored response was corrupted by a byte-index cut through a multi-byte rune")
+	}
+}
+
+func TestSession_RecordTurn_TruncatesLongQueryTooNotJustResponse(t *testing.T) {
+	sess := newSession("s1")
+	// A pasted diff or long prompt is exactly the shape server.go's own
+	// reader-loop comment anticipates — query deserves the same bound as
+	// response, since it's replayed into every one of the next
+	// historyMaxTurns prompts otherwise.
+	longQuery := strings.Repeat("q", historyMaxResponseChars+500)
+	sess.recordTurn(longQuery, "short answer")
+
+	sess.mu.Lock()
+	stored := sess.history[0].query
+	sess.mu.Unlock()
+
+	if len([]rune(stored)) > historyMaxResponseChars+len("...[truncated]") {
+		t.Errorf("stored query has %d runes, want it truncated to around historyMaxResponseChars (%d) like response already is", len([]rune(stored)), historyMaxResponseChars)
+	}
+}
+
+func TestSessionMap_AddGet(t *testing.T) {
+	m := newSessionMap()
+	sess := newSession("s1")
+	m.add(sess)
+
+	got, ok := m.get("s1")
+	if !ok {
+		t.Fatal("expected to find session s1")
+	}
+	if got != sess {
+		t.Error("get returned a different session than the one added")
+	}
+}
+
+func TestSessionMap_Get_NotFound(t *testing.T) {
+	m := newSessionMap()
+	_, ok := m.get("nonexistent")
+	if ok {
+		t.Error("expected ok=false for an unknown session id")
 	}
 }

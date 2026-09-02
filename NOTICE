@@ -47,5 +47,15 @@ transitive dependencies. Each dependency retains its own license terms.
 
 ---
 
+Protocol specifications implemented against (schema reference only — no
+code vendored or shared, this is a from-scratch Go implementation):
+
+- Agent Client Protocol (ACP) — Zed Industries.
+  https://github.com/zed-industries/agent-client-protocol
+  internal/acp/'s server implements this JSON-RPC-over-stdio protocol,
+  checked against the published schema.
+
+---
+
 The Business Source License is a trademark of MariaDB Corporation Ab.
 License text copyright (c) 2020 MariaDB Corporation Ab, All Rights Reserved.

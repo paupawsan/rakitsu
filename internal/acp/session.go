@@ -5,97 +5,187 @@ package acp
 
 import (
 	"context"
+	"strings"
 	"sync"
 )
 
-// sessionStatus represents the lifecycle state of a single ACP run.
-type sessionStatus string
-
 const (
-	statusRunning   sessionStatus = "running"
-	statusCompleted sessionStatus = "completed"
-	statusError     sessionStatus = "error"
-	statusCancelled sessionStatus = "cancelled"
+	// historyMaxTurns bounds how many prior turns are threaded into the next
+	// session/prompt call. Mirrors internal/chat/history.go's identical
+	// constant for the interactive chat TUI — kept as a separate, ACP-local
+	// copy rather than a shared import: that package pulls in the
+	// bubbletea/lipgloss TUI dependency tree, which a headless protocol
+	// server has no other reason to depend on.
+	historyMaxTurns = 10
+	// historyMaxResponseChars truncates a long stored response so an
+	// enormous prior answer doesn't blow the next turn's context window.
+	historyMaxResponseChars = 2000
 )
 
-// Session tracks one active agent/run request.
+// Session tracks one ACP session: a conversation identity a client can send
+// multiple session/prompt turns against. Unlike the old agent/run model
+// (one Session = one run, created together with that run's cancel func and
+// polled to completion via agent/status), real ACP sessions outlive any
+// single turn — session/new mints the identity before any prompt exists, and
+// a session/prompt can be sent against it more than once. So a Session's job
+// here is narrower: hold the *current* turn's cancel func (so a
+// session/cancel notification has something to call), remember whether that
+// turn was cancelled (so the turn's own completion path can tell a
+// cancellation-caused error apart from a real failure), and accumulate prior
+// turns' query/response text — executeConfig (the RunFunc every turn calls)
+// has no native multi-turn API, so composeQuery below is what makes several
+// session/prompt calls against one session feel like a continuous
+// conversation instead of independent, context-free runs.
 type Session struct {
-	ID     string
-	cancel context.CancelFunc
+	ID string
 
-	mu     sync.Mutex
-	status sessionStatus
-	result string
-	errMsg string
+	mu        sync.Mutex
+	cancel    context.CancelFunc // set for the duration of the in-flight session/prompt call; nil when idle
+	cancelled bool               // sticky for the current/just-finished turn; cleared by the next startTurn
+	history   []promptTurn       // recorded session/prompt turns, oldest first
 }
 
-func newSession(id string, cancel context.CancelFunc) *Session {
-	return &Session{
-		ID:     id,
-		cancel: cancel,
-		status: statusRunning,
+// promptTurn is one session/prompt request/response pair, recorded so a
+// later turn on the same session can see what was already discussed.
+type promptTurn struct {
+	query    string
+	response string
+}
+
+func newSession(id string) *Session {
+	return &Session{ID: id}
+}
+
+// startTurn attempts to arm the session for a new in-flight session/prompt
+// call, clearing any cancelled flag left over from a prior turn — a
+// session/cancel aimed at an already-finished turn must not bleed into the
+// next one. Returns false, changing nothing, if a turn is already in flight:
+// real ACP sessions serve one prompt turn at a time, and the caller must
+// reject an overlapping session/prompt rather than let a second startTurn
+// silently overwrite the first turn's cancel func (which endTurn could then
+// nil out from under the wrong turn).
+func (s *Session) startTurn(cancel context.CancelFunc) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cancel != nil {
+		return false
+	}
+	s.cancel = cancel
+	s.cancelled = false
+	return true
+}
+
+// endTurn disarms the cancel func once the in-flight session/prompt call has
+// returned — a session/cancel arriving after this point has nothing to call.
+func (s *Session) endTurn() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cancel = nil
+}
+
+// requestCancel calls the current turn's cancel func, if one is in flight,
+// and marks the session cancelled either way.
+func (s *Session) requestCancel() {
+	s.mu.Lock()
+	cancel := s.cancel
+	s.cancelled = true
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 }
 
-// complete records a successful run — unless the session already reached a
-// terminal state (cancelled or, symmetrically with fail(), error). The
-// current call sites (all in handleRun) never actually call both complete()
-// and fail() for the same session, so the error case isn't reachable today —
-// but checking only cancelled here while cancelled() itself guards both
-// completed and error was an asymmetry that any future call site could fall
-// into. Mirrors fail()'s guard below.
-func (s *Session) complete(result string) {
+// wasCancelled reports whether session/cancel was called for the current (or
+// just-finished) turn.
+func (s *Session) wasCancelled() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.status == statusCancelled || s.status == statusError {
-		return
+	return s.cancelled
+}
+
+// composeQuery returns query prefixed with this session's recorded prior
+// turns, in the same "Previous conversation: ... Current question: ..."
+// shape internal/chat/history.go's buildQueryWithHistory uses for the
+// interactive chat TUI — the format that's already proven to work with the
+// agents in this codebase. Returns query unchanged when there's no history
+// yet (the common case: a session's first turn).
+func (s *Session) composeQuery(query string) string {
+	s.mu.Lock()
+	turns := append([]promptTurn(nil), s.history...) // copy out under lock
+	s.mu.Unlock()
+
+	if len(turns) == 0 {
+		return query
 	}
-	s.status = statusCompleted
-	s.result = result
-}
 
-// fail records a run failure — unless the session already reached a terminal
-// state (cancelled or, symmetrically with complete(), completed). A
-// cancelled run's own goroutine typically observes context cancellation and
-// calls fail() with a "context canceled"-flavored error shortly after
-// handleCancel already recorded the cancellation; without the cancelled
-// guard that call would silently clobber the terminal "cancelled" status
-// back to "error". The completed guard closes the mirror image for the same
-// reason cancelled() itself already checks both terminal states.
-func (s *Session) fail(msg string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.status == statusCancelled || s.status == statusCompleted {
-		return
+	var sb strings.Builder
+	sb.WriteString("Previous conversation:\n")
+	for _, t := range turns {
+		if t.query != "" {
+			sb.WriteString("User: ")
+			sb.WriteString(t.query)
+			sb.WriteString("\n")
+		}
+		if t.response != "" {
+			sb.WriteString("Assistant: ")
+			sb.WriteString(t.response)
+			sb.WriteString("\n")
+		}
 	}
-	s.status = statusError
-	s.errMsg = msg
+	sb.WriteString("\nCurrent question:\n")
+	sb.WriteString(query)
+	return sb.String()
 }
 
-// cancelled records a run cancellation — unless the session already reached
-// a terminal state. Mirrors the guard on complete()/fail(): the run
-// goroutine's own completion path can land between handleCancel's
-// sess.cancel() and sess.cancelled() calls (the session isn't removed from
-// the registry until the goroutine's deferred delete, after its
-// "agent/complete" notification is already sent), and without this guard a
-// late-arriving agent/cancel would silently overwrite an already-reported
-// "completed"/"error" outcome back to "cancelled".
-func (s *Session) cancelled() {
+// recordTurn appends this turn's original (uncomposed) query and its
+// response to the session's history, so a later session/prompt can see it
+// via composeQuery. Called for every outcome — success, error, cancelled,
+// or panic — not just success: without something recorded for a failed or
+// cancelled turn, the next turn's composed history has a silent gap the
+// model can't account for (mirrors internal/chat/model.go's identical
+// reasoning for always recording an assistant entry, error placeholder
+// included).
+//
+// Trims to historyMaxTurns and truncates both query and response to
+// historyMaxResponseChars right here at store time, so the
+// untruncated/unbounded text isn't retained at all: composeQuery only ever
+// reads what's already bounded, rather than re-deriving the bound on every
+// call from an unbounded slice. query gets the same bound as response
+// since it's replayed into every one of the next historyMaxTurns prompts
+// otherwise — a pasted diff in the query is exactly as capable of blowing
+// the context window as a long model answer.
+func (s *Session) recordTurn(query, response string) {
+	query = truncateHistoryText(query)
+	response = truncateHistoryText(response)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.status == statusCompleted || s.status == statusError {
-		return
+	s.history = append(s.history, promptTurn{query: query, response: response})
+	if len(s.history) > historyMaxTurns {
+		s.history = s.history[len(s.history)-historyMaxTurns:]
 	}
-	s.status = statusCancelled
 }
 
-func (s *Session) snapshot() (sessionStatus, string, string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.status, s.result, s.errMsg
+// truncateHistoryText bounds s to historyMaxResponseChars runes (not bytes —
+// CJK/emoji text is multi-byte per rune, and slicing on bytes can cut
+// mid-rune, corrupting the string). A cheap byte-length check short-circuits
+// the common case of a short string with no []rune allocation: every rune is
+// at least one byte, so len(s) <= historyMaxResponseChars in bytes already
+// guarantees the rune count is within the limit too.
+func truncateHistoryText(s string) string {
+	if len(s) <= historyMaxResponseChars {
+		return s
+	}
+	if rs := []rune(s); len(rs) > historyMaxResponseChars {
+		s = string(rs[:historyMaxResponseChars]) + "...[truncated]"
+	}
+	return s
 }
 
-// sessionMap is a thread-safe registry of active sessions.
+// sessionMap is a thread-safe registry of known sessions. Sessions live for
+// the lifetime of the server process in v1 — there is no polling method to
+// race against deletion the way the old agent/status did, so nothing needs
+// to prune this map yet.
 type sessionMap struct {
 	mu   sync.Mutex
 	data map[string]*Session
@@ -116,10 +206,4 @@ func (m *sessionMap) get(id string) (*Session, bool) {
 	s, ok := m.data[id]
 	m.mu.Unlock()
 	return s, ok
-}
-
-func (m *sessionMap) delete(id string) {
-	m.mu.Lock()
-	delete(m.data, id)
-	m.mu.Unlock()
 }
