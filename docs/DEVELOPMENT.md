@@ -412,6 +412,12 @@ web/src/
 
 # Show version
 ./bin/rakitsu version
+
+# Run as an ACP server (stdio JSON-RPC, e.g. for Zed integration)
+./bin/rakitsu acp examples/single/02-single-agent/config.yaml
+
+# Serve also exposes MCP (/mcp) and A2A (/a2a) endpoints when given a config
+./bin/rakitsu serve --config examples/single/02-single-agent/config.yaml --mcp-port 9200
 ```
 
 ### Running Tests
@@ -550,12 +556,15 @@ rakitsu/
 ├── cmd/rakitsu/                 # CLI entry point
 │   ├── root.go               #   Root command + global flags
 │   ├── run.go                #   rakitsu run — execute agents
-│   ├── serve.go              #   rakitsu serve — SSE hub + web UI
+│   ├── serve.go              #   rakitsu serve — SSE hub + web UI + /mcp + /a2a
+│   ├── acp.go                #   rakitsu acp — ACP stdio server
 │   └── scaffold.go           #   rakitsu scaffold — config templates
 ├── internal/
 │   ├── agent/                # ReAct loop + orchestrator
 │   │   ├── agent.go          #   Single agent execution
 │   │   └── orchestrator.go   #   Multi-agent coordination
+│   ├── acp/                  # ACP (Agent Client Protocol) server
+│   │   └── server.go         #   Session/prompt JSON-RPC over stdio
 │   ├── config/               # YAML config parsing
 │   │   └── config.go         #   Viper-based config structs
 │   ├── llm/                  # LLM provider abstraction
@@ -566,12 +575,15 @@ rakitsu/
 │   ├── tools/                # Tool interface + implementations
 │   │   ├── tool.go           #   Tool interface
 │   │   ├── cli/              #   CLI tool (sandboxed)
-│   │   └── fs/               #   File system tool (restricted)
+│   │   ├── fs/                #   File system tool (restricted)
+│   │   ├── mcp/               #   MCP client tool (mcp_server type)
+│   │   └── a2a/               #   A2A delegation tool (a2a type)
 │   ├── telemetry/            # Event bus + typed events
 │   │   └── events.go         #   EventType constants + payloads
-│   ├── server/               # SSE hub + API + runner
+│   ├── server/               # SSE hub + API + runner + MCP/A2A servers
 │   │   ├── sse.go            #   SSE server
 │   │   ├── hub.go            #   Hub endpoints
+│   │   ├── mcp.go            #   MCP server (/mcp)
 │   │   ├── runner.go         #   Agent runner
 │   │   └── configs.go        #   Config store
 │   ├── debug/                # Debugger subsystem

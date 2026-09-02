@@ -76,12 +76,19 @@ Open **http://localhost:9100** — drag agents onto the canvas, wire up tools, h
 - Secure tools: CLI whitelist/blocklist, file path restrictions, Docker sandbox
 - Cross-platform: Linux, macOS, Windows (amd64 + arm64)
 
+**Protocol interop**
+- `rakitsu acp` — run as an ACP (Agent Client Protocol) server so editors like Zed can talk to rakitsu agents directly
+- `rakitsu serve` exposes an MCP server at `/mcp` (legacy era, ≤2025-11-25 revision) so external MCP clients can discover and call rakitsu's tools
+- `rakitsu serve` exposes an A2A endpoint at `/a2a` (real A2A v1.0.1) plus agent-card discovery, so a rakitsu agent can delegate to a named agent in a different rakitsu process
+- Tool types `mcp_server` and `a2a` let a rakitsu agent call *out* to other MCP servers or A2A agents
+
 ## CLI
 
 ```bash
 rakitsu quickstart                    # Interactive project wizard
-rakitsu serve                         # Web UI + agent runner
+rakitsu serve                         # Web UI + agent runner (also serves MCP at /mcp, A2A at /a2a)
 rakitsu run config.yaml "query"       # Run agents from CLI
+rakitsu acp                           # Run as an ACP server (editor integration, e.g. Zed)
 rakitsu scaffold code-review          # Generate config from template
 rakitsu sessions                      # Browse past runs
 rakitsu doctor config.yaml            # Diagnose config + provider health before running
