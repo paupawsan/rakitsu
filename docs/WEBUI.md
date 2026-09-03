@@ -37,7 +37,7 @@ rakitsu serve --port 9100
 | Type | Purpose | Handles |
 |---|---|---|
 | **Agent** | LLM-powered worker or supervisor | In (top), Out to tools/skills (bottom) |
-| **Tool** | CLI command or filesystem operation | In (top) |
+| **Tool** | CLI command, filesystem operation, MCP server call, or A2A delegation | In (top) |
 | **Skill** | Reusable tool+prompt combination | In (top) |
 | **Orchestrator** | Manages agent coordination strategy | In (top), Out to agents (bottom) |
 | **Group** | Container block for grouping nodes | In (top), Out (bottom) |

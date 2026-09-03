@@ -21,9 +21,10 @@
 11. [Telemetry & Events](#11-telemetry--events)
 12. [Real-Time Debugging](#12-real-time-debugging)
 13. [Hub Architecture](#13-hub-architecture)
-14. [Frontend](#14-frontend)
-15. [Extension Points](#15-extension-points)
-16. [Build & Development](#16-build--development)
+14. [Protocol Interop (ACP / MCP / A2A)](#14-protocol-interop-acp--mcp--a2a)
+15. [Frontend](#15-frontend)
+16. [Extension Points](#16-extension-points)
+17. [Build & Development](#17-build--development)
 
 ---
 
@@ -267,38 +268,57 @@ flowchart TD
 
 ## 3. CLI Commands
 
+11 top-level commands: `run`, `serve`, `ui` (deprecated), `version`, `sessions`, `export`, `scaffold`, `quickstart`, `doctor`, `acp`, `license` (pro builds only).
+
 ### `rakitsu run <config.yaml> <query>`
 
 Execute agents for a given query.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--timeout` | 300s | Execution timeout |
+| `--timeout, -t` | 300s | Execution timeout (`<=0` disables it) |
+| `--idle-timeout` | 0 (disabled) | Cancel the run after N seconds with no streaming activity |
 | `--trace` | false | Color-coded trace to stderr |
-| `--verbose, -v` | false | Print agent/model info |
-| `--hub URL` | `localhost:9100` | Hub URL for monitoring |
+| `--verbose, -v` | false | Print agent/model info (root persistent flag) |
+| `--hub URL` | `http://localhost:9100` | Hub URL for event streaming |
 | `--no-hub` | false | Run standalone (no hub) |
 | `--debug-port N` | 0 | Standalone debug SSE server |
+| `--interactive, -i` | false | Run as a chat TUI instead of one-shot |
+| `--resume ID` | — | Resume a prior session by ID |
+| `--workdir, -w` | cwd | Working directory for tool execution |
+| `--provider NAME` | — | Override default provider for all agents |
+| `--model NAME` | — | Override default model for all agents |
+| `--max-tokens N` | 0 (config value) | Override max output tokens for all agents/orchestrators |
+| `--max-cost` | 0 (disabled) | Abort run if total cost exceeds this USD amount |
+| `--embedding-provider NAME` | — | Override embedding provider for context retrieval |
+| `--attach PATH` | — | Attach a local image file to the query (repeatable; requires the agent's `vision: true`) |
+| `--dry-run` | false | Estimate cost/tokens without calling the LLM |
 
 ### `rakitsu serve`
 
-Start SSE hub for monitoring multiple concurrent runs.
+Start the SSE hub, web UI, runner, and debugger. Also serves an MCP server at `/mcp` and an A2A endpoint at `/a2a` (see §14).
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--port, -p` | 9100 | Hub port |
-| `--host` | localhost | Bind host |
+| `--port, -p` | 9100 | Hub/UI port |
+| `--host` | localhost | Bind host (non-loopback requires `RAKITSU_API_TOKEN` — see [SECURITY.md](SECURITY.md)) |
+| `--mcp-port N` | 0 (disabled) | Start the MCP HTTP server on this port (requires `--config`) |
+| `--config PATH` | — | YAML config to load tools/agents from, for the MCP server and A2A endpoint |
+| `--config-dir` | — | Extra directory to scan for agent configs in the UI |
 
-### `rakitsu ui`
+### `rakitsu ui` — deprecated alias for `rakitsu serve`
 
-Full web UI (builder + inspector + debugger + runner).
+Kept for backward compatibility; `serve` now includes the full web UI + runner.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--port, -p` | 8080 | UI port |
+| `--port, -p` | 9100 | Hub/UI port |
 | `--host` | localhost | Bind host |
 | `--config-dir` | — | Extra config search path |
-| `--dev` | false | Serve from `./web/dist` |
+
+### `rakitsu acp <config.yaml>`
+
+Run as an ACP (Agent Client Protocol) stdio server — the mechanism editors like Zed use to talk to rakitsu agents directly. See §14.
 
 ---
 
@@ -308,8 +328,12 @@ Full web UI (builder + inspector + debugger + runner).
 
 ```yaml
 name: string
+project_id: string           # optional
 version: string
 description: string
+interactive: bool            # optional — run as chat TUI instead of one-shot
+interactive_overlay: bool    # optional — wrap root runner in chat-host meta-agent (default: true for non-conversational configs)
+force_delegation: bool       # optional — ChatHost must call invoke_config every turn
 settings:
   default_provider: string
   providers: { name: ProviderDefinition }
@@ -326,6 +350,8 @@ tools: [ToolDefinition]
 skills: [SkillDefinition]
 agents: [AgentDefinition]
 orchestrator: OrchestratorConfig
+orchestrators: [OrchestratorConfig]  # optional — multiple named orchestrators
+workflows: [WorkflowDefinition]      # optional
 ```
 
 ### Provider Resolution
@@ -651,6 +677,8 @@ graph TD
     REG["ToolRegistry"]
     REG --> CLI["CLI Tool\ntype: cli"]
     REG --> FS["FS Tool\ntype: fs"]
+    REG --> MCP["MCP Client Tool\ntype: mcp_server"]
+    REG --> A2A["A2A Tool\ntype: a2a"]
 
     CLI --> SWLIST["System whitelist\n(hard-coded safe commands)"]
     CLI --> BLIST["Block list\nrm, sudo, chmod, kill..."]
@@ -660,7 +688,15 @@ graph TD
     FS --> FOPS["Operations:\nread / write / list / search"]
     FS --> PATHS["allowed_paths (default: '.')"]
     FS --> TRAV["Prevents directory\ntraversal"]
+
+    MCP --> TRANS["stdio or http transport"]
+    MCP --> DISC["Tools auto-discovered\nat startup"]
+
+    A2A --> DELE["Delegates to a named agent\nin a different rakitsu process"]
+    A2A --> POLL["Polls GetTask with backoff\nfor long-running remote work"]
 ```
+
+See §14 for the ACP/MCP/A2A protocol details (both directions: rakitsu as a client via these tool types, and rakitsu as a server via `rakitsu acp` / `rakitsu serve --mcp-port` / `rakitsu serve` `/a2a`).
 
 ### Tool Execution Flow (Parallel)
 
@@ -1075,6 +1111,11 @@ GET  /debug/export          → Download config with overrides
 
 ## 13. Hub Architecture
 
+`rakitsu serve` mounts more than the hub: alongside the SSE/hub endpoints
+below, it also serves an MCP server at `/mcp` (with `--mcp-port` + `--config`)
+and an A2A endpoint at `/a2a` + `/.well-known/agent-card.json` (with
+`--config`) on the same or a separate port. See §14 for the protocol details.
+
 ```
 rakitsu run (CLI)                       rakitsu serve (Hub)          Browser
        │                                      │                      │
@@ -1156,7 +1197,54 @@ flowchart TD
 
 ---
 
-## 14. Frontend
+## 14. Protocol Interop (ACP / MCP / A2A)
+
+rakitsu speaks three external agent/tool protocols, in both directions.
+
+### ACP (Agent Client Protocol) — `rakitsu acp <config.yaml>`
+
+Runs rakitsu as a stdio JSON-RPC server so editors that speak ACP (e.g. Zed)
+can drive rakitsu agents directly — session create, prompt turns, streaming
+updates. Implementation: `internal/acp/`. Session history is truncated
+rune-safe at storage time to bound memory on long-running sessions.
+
+### MCP server — `rakitsu serve --mcp-port N --config <config.yaml>`
+
+Exposes rakitsu's registered tools as an MCP server at `POST /mcp` (also
+mounted on the main `serve` port). Implementation: `internal/server/mcp.go`.
+Spec-compliant for the **legacy MCP era** (protocol revisions through
+2025-11-25): `Mcp-Session-Id` is required and validated (400/404 on
+missing/unknown), `protocolVersion` is negotiated against the versions
+rakitsu supports rather than hardcoded, and `Origin` is checked as a
+DNS-rebinding guard (403 on a disallowed origin). The **modern MCP era**
+(2026-07-28 revision) is not yet implemented. `RAKITSU_API_TOKEN` gates
+`/mcp` and `/a2a` on the main `serve` port; the standalone `--mcp-port`
+listener has a known gap where non-`/mcp` paths on that listener bypass the
+token check — a known limitation, not yet fixed.
+
+### MCP client — tool type `mcp_server`
+
+An agent can also call *out* to another MCP server as a tool (§8, §4).
+Implementation: `internal/tools/mcp/`. Supports both `stdio` (subprocess) and
+`http` transports.
+
+### A2A (Agent-to-Agent) — `rakitsu serve --config <config.yaml>` (`/a2a`)
+
+Exposes rakitsu agents as A2A v1.0.1 agents: `POST /a2a` (JSON-RPC,
+PascalCase methods — `SendMessage`, `GetTask`, `CancelTask`) plus Agent Card
+discovery at `GET /.well-known/agent-card.json`. Implementation:
+`cmd/rakitsu/a2a_serve.go`. A remote request selects which local agent to
+run via the spec's `tenant` field, repurposed for that; task state is
+tracked in a capped in-memory store (no persistence across restarts).
+Streaming (`SendStreamingMessage`), push-notification config, and AgentCard
+JWS signing are out of scope. The `a2a` tool type (§8, §4) is the client
+side — an agent delegates to a named agent in a different rakitsu process,
+polling `GetTask` with backoff while the remote task is
+`TASK_STATE_WORKING`/`SUBMITTED`.
+
+---
+
+## 15. Frontend
 
 ### Component Map
 
@@ -1235,7 +1323,7 @@ const { events, status } = useEventStream(serverUrl)
 
 ---
 
-## 15. Extension Points
+## 16. Extension Points
 
 ### New Tool Type
 
@@ -1312,7 +1400,7 @@ graph LR
 
 ---
 
-## 16. Build & Development
+## 17. Build & Development
 
 ### Makefile Targets
 

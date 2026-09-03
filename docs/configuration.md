@@ -139,13 +139,18 @@ Inline definitions in the main config file take precedence. If an agent named "C
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | Project/system name |
+| `project_id` | string | Optional project identifier (optional) |
 | `version` | string | Configuration version |
 | `description` | string | Description of the system |
+| `interactive` | bool | Run as a chat TUI instead of a one-shot run (optional) |
+| `interactive_overlay` | bool | Wrap the root runner in a chat-host meta-agent; defaults to `true` for non-conversational configs (optional) |
+| `force_delegation` | bool | ChatHost must call `invoke_config` every turn — removes the "answer directly" path and discovery tools; use for weak models that would otherwise skip delegation (optional) |
 | `settings` | Settings | Global settings |
 | `tools` | ToolDefinition[] | Tool definitions |
 | `skills` | SkillDefinition[] | Skill definitions |
 | `agents` | AgentDefinition[] | Agent definitions |
 | `orchestrator` | OrchestratorConfig | Multi-agent orchestrator (optional) |
+| `orchestrators` | OrchestratorConfig[] | Multiple named orchestrators (optional) |
 | `workflows` | WorkflowDefinition[] | Pre-configured workflows (optional) |
 
 ## Settings
@@ -303,6 +308,19 @@ tools:
         type: "string"
         description: "Path to the file"
         required: true
+
+  - name: "external_tools"
+    type: "mcp_server"
+    description: "Tools from a remote MCP server"
+    url: "http://localhost:9200/mcp"     # http transport
+    transport: "http"                    # "stdio" or "http"
+    # args: ["--flag"]                   # stdio transport: subprocess args
+
+  - name: "researcher"
+    type: "a2a"
+    description: "Delegate to the Researcher agent on another rakitsu process"
+    url: "http://research-host:9100/a2a"
+    agent: "Researcher"                  # remote agent name to delegate to
 ```
 
 ### ToolDefinition Fields
@@ -310,7 +328,7 @@ tools:
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | **Required.** Unique tool name |
-| `type` | string | **Required.** Tool type: `cli`, `fs` |
+| `type` | string | **Required.** Tool type: `cli`, `fs`, `mcp_server`, `a2a` |
 | `description` | string | What the tool does (shown to LLM) |
 | `command` | string | Shell command (for `cli` type) |
 | `operation` | string | Operation name (for `fs` type): `read`, `write`, `search`, `list` |
@@ -322,6 +340,10 @@ tools:
 | `env` | map[string]string | Environment variables |
 | `working_dir` | string | Working directory |
 | `allowed_paths` | []string | Allowed filesystem paths |
+| `args` | []string | Subprocess args (for `mcp_server` type, stdio transport) |
+| `url` | string | Server URL (for `mcp_server` type, http transport; also used by `a2a` type) |
+| `transport` | string | `stdio` or `http` (for `mcp_server` type) |
+| `agent` | string | Remote agent name to delegate to (for `a2a` type) |
 | `allowed_exit_codes` | []int | Acceptable exit codes |
 | `sandbox` | SandboxConfig | Security sandbox configuration |
 
