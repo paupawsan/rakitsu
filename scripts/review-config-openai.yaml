@@ -65,6 +65,14 @@ agents:
       Do not invent line numbers you did not see in the provided text. Do
       not speculate about files you were not shown.
 
+      Output ONLY ### FINDING blocks, or the literal text NO FINDINGS —
+      nothing else. No greeting, no summary of the diff, no restating what
+      changed, no style suggestions, no "safer alternative" snippets, no
+      offers to do further work. This is a one-shot automated job with no
+      follow-up turn: phrases like "if you'd like" or "let me know" are
+      never appropriate here, since nothing will ever read a reply to
+      them.
+
 orchestrator:
   name: Lead
   strategy: Sequential
