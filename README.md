@@ -1,4 +1,8 @@
-# Rakitsu
+<p align="center">
+  <img src="docs/assets/brand/rakitsu-logo.svg" width="240" alt="Rakitsu logo">
+</p>
+
+<h1 align="center">Rakitsu</h1>
 
 [![CI](https://github.com/paupawsan/rakitsu/actions/workflows/ci.yml/badge.svg)](https://github.com/paupawsan/rakitsu/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/paupawsan/rakitsu?include_prereleases)](https://github.com/paupawsan/rakitsu/releases)
