@@ -378,6 +378,99 @@ func TestBuildCommand_ShellPayloadBlocklistAllowsSubstrings(t *testing.T) {
 	}
 }
 
+func TestBuildCommand_ShellPayloadBlocklistAllowsSubcommands(t *testing.T) {
+	// Regression: git's own subcommands share a name with a blocked
+	// standalone command ("init", "mv") -- the lint must only check the
+	// first word of each command segment, not every token in the payload.
+	// Found live: dogfood scenario 14's bootstrap step ran `git init -q`
+	// and got rejected with "shell payload contains blocked command init",
+	// even though "init" here is git's subcommand, not the system command.
+	def := &config.ToolDefinition{
+		Name:    "git-shell",
+		Command: "sh -c 'git {{args}}'",
+		Parameters: map[string]config.Parameter{
+			"args": {Type: "string", Required: true},
+		},
+	}
+	tool := NewTool(def)
+
+	cases := []string{
+		"init -q",
+		"mv old.txt new.txt",
+	}
+	for _, args := range cases {
+		if _, err := tool.buildCommand(map[string]interface{}{"args": args}); err != nil {
+			t.Errorf("git subcommand %q should not trigger blocklist: %v", args, err)
+		}
+	}
+}
+
+func TestBuildCommand_ShellPayloadBlocklistCatchesStandaloneAcrossSeparators(t *testing.T) {
+	// The fix for the subcommand false positive must not weaken detection
+	// of a genuinely standalone blocked command after any shell separator.
+	def := &config.ToolDefinition{
+		Name:    "sh-tool",
+		Command: "sh -c '{{cmd}}'",
+		Parameters: map[string]config.Parameter{
+			"cmd": {Type: "string", Required: true},
+		},
+	}
+	tool := NewTool(def)
+
+	cases := map[string]string{
+		"leading semicolon":  "echo hi; rm -rf /tmp/x",
+		"leading &&":         "echo hi && rm -rf /tmp/x",
+		"leading pipe":       "cat file | rm -rf /tmp/x",
+		"sole invocation":    "rm -rf /tmp/x",
+		"inside a subshell":  "(cd /tmp && rm -rf x)",
+		"backtick expansion": "echo `rm -rf /tmp/x`",
+	}
+	for name, cmd := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := tool.buildCommand(map[string]interface{}{"cmd": cmd})
+			if err == nil {
+				t.Fatalf("expected blocked-command error for %q, got none", cmd)
+			}
+			if !strings.Contains(err.Error(), "rm") {
+				t.Errorf("error should mention 'rm', got: %v", err)
+			}
+		})
+	}
+}
+
+func TestBuildCommand_ShellPayloadBlocklistCatchesReExecWrappers(t *testing.T) {
+	// Regression: restricting the lint to a segment's first word (the fix
+	// above) stopped it from catching a blocked command hiding behind a
+	// wrapper that re-invokes a later word as the actual command to run —
+	// unlike `git mv`, where "mv" is git's own subcommand and never
+	// executes as a standalone command.
+	def := &config.ToolDefinition{
+		Name:    "sh-tool",
+		Command: "sh -c '{{cmd}}'",
+		Parameters: map[string]config.Parameter{
+			"cmd": {Type: "string", Required: true},
+		},
+	}
+	tool := NewTool(def)
+
+	cases := map[string]string{
+		"xargs":      "xargs rm -rf /tmp/x",
+		"find -exec": "find . -exec rm -rf {} +",
+		"env":        "env rm -rf /tmp/x",
+	}
+	for name, cmd := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := tool.buildCommand(map[string]interface{}{"cmd": cmd})
+			if err == nil {
+				t.Fatalf("expected blocked-command error for %q, got none", cmd)
+			}
+			if !strings.Contains(err.Error(), "rm") {
+				t.Errorf("error should mention 'rm', got: %v", err)
+			}
+		})
+	}
+}
+
 // ============================================================
 // Stress — concurrent Execute calls
 // ============================================================
