@@ -52,6 +52,76 @@ func TestWrapAPIError_ExtractsStatusFromRequestError(t *testing.T) {
 	}
 }
 
+// TestWrapAPIError_ExtractsParamFromAPIError verifies wrapAPIError carries
+// forward the `param` field an APIError names (e.g. "temperature" on a
+// reasoning-tier model's 400) — the field omitRejectedParam reads to decide
+// whether to retry without it.
+func TestWrapAPIError_ExtractsParamFromAPIError(t *testing.T) {
+	param := "temperature"
+	sdkErr := &openai.APIError{
+		HTTPStatusCode: 400,
+		Message:        "Unsupported parameter: 'temperature' is not supported with this model.",
+		Param:          &param,
+	}
+	wrapped := wrapAPIError("openai API error", sdkErr)
+
+	var pc paramCoder
+	if !errors.As(wrapped, &pc) {
+		t.Fatal("wrapped error does not implement paramCoder")
+	}
+	got, ok := pc.Param()
+	if !ok || got != "temperature" {
+		t.Errorf("Param() = (%q, %v), want (\"temperature\", true)", got, ok)
+	}
+}
+
+// TestWrapAPIError_ExtractsParamFromNestedMessage covers a real shape seen
+// against the DGX LiteLLM proxy: the outer APIError has no top-level `param`
+// (the proxy didn't propagate it), but its `Message` string double-encodes
+// the upstream provider's own JSON error body as literal text, which does
+// name the param. wrapAPIError must fall back to scanning the message for it
+// rather than reporting "absent" just because the top-level field is empty.
+func TestWrapAPIError_ExtractsParamFromNestedMessage(t *testing.T) {
+	sdkErr := &openai.APIError{
+		HTTPStatusCode: 400,
+		Message: `litellm.BadRequestError: OpenAIException - {
+  "error": {
+    "message": "Unsupported parameter: 'temperature' is not supported with this model.",
+    "type": "invalid_request_error",
+    "param": "temperature",
+    "code": null
+  }
+}No fallback model group found for original model_group=openai/gpt-5.6-luna.`,
+		Param: nil,
+	}
+	wrapped := wrapAPIError("openai stream error", sdkErr)
+
+	var pc paramCoder
+	if !errors.As(wrapped, &pc) {
+		t.Fatal("wrapped error does not implement paramCoder")
+	}
+	got, ok := pc.Param()
+	if !ok || got != "temperature" {
+		t.Errorf("Param() = (%q, %v), want (\"temperature\", true)", got, ok)
+	}
+}
+
+// TestWrapAPIError_NoParamReportsAbsent verifies an APIError with no `param`
+// field (or an error type without one at all) reports absence rather than an
+// empty-but-present param — omitRejectedParam must not mistake "" for a real
+// field name.
+func TestWrapAPIError_NoParamReportsAbsent(t *testing.T) {
+	wrapped := wrapAPIError("openai API error", &openai.APIError{HTTPStatusCode: 400, Message: "bad request"})
+
+	var pc paramCoder
+	if !errors.As(wrapped, &pc) {
+		t.Fatal("wrapped error does not implement paramCoder")
+	}
+	if got, ok := pc.Param(); ok {
+		t.Errorf("Param() = (%q, true), want ok=false when the API named no param", got)
+	}
+}
+
 // TestWrapAPIError_UnknownErrorTypeReportsZero verifies an error that isn't
 // one of the SDK's known status-carrying types (e.g. a raw network error
 // from the underlying transport) reports status 0 rather than a wrong code,

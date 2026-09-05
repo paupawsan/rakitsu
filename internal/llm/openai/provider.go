@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -99,6 +100,66 @@ func isReasoningModel(model string) bool {
 		}
 	}
 	return false
+}
+
+// paramCoder is implemented by an error that can name the specific request
+// parameter an API call rejected — populated from the SDK's structured
+// APIError.Param field (see statusError.Param in errors.go).
+type paramCoder interface {
+	Param() (string, bool)
+}
+
+// omitRejectedParam clears req.Temperature or req.TopP when wrapped names one
+// of them as the rejected param via the SDK's structured `param` field, and
+// the request actually set it non-zero this call. Returns true when a field
+// was cleared, meaning the caller should retry the identical request once.
+// It also prints a one-line stderr warning naming the model and the value
+// dropped, with a concrete fix — this is a silent recovery from the caller's
+// perspective (the call ends up succeeding), and a user who never sees it has
+// no way to know their configured temperature/top_p is being ignored.
+//
+// This exists because isReasoningModel's prefix check (o1/o3/o4/gpt-5) misses
+// vendor-prefixed aliases — LiteLLM routes models as "openai/gpt-5.6-luna",
+// which doesn't start with "gpt-5" even though the real backend model is
+// reasoning-tier and rejects non-default temperature/top_p. Rather than
+// maintain a growing prefix/alias list, read what the API already told us:
+// the 400 body names the exact rejected field, per real model, per real
+// proxy config, in real time. Any other param name (or none at all) returns
+// false unchanged — that's a different, real problem and should keep failing
+// loudly rather than being silently retried.
+func omitRejectedParam(req *openai.ChatCompletionRequest, wrapped error) bool {
+	var pc paramCoder
+	if !errors.As(wrapped, &pc) {
+		return false
+	}
+	param, ok := pc.Param()
+	if !ok {
+		return false
+	}
+	switch param {
+	case "temperature":
+		if req.Temperature == 0 {
+			return false
+		}
+		fmt.Fprintf(os.Stderr, "Warning: model %q rejected temperature=%v — retrying without it. "+
+			"That usually means it's a reasoning-tier model, which only accepts the default (temperature: 1). "+
+			"Set model_config.temperature: 1 on this agent (or drop temperature entirely) to stop relying on this retry.\n",
+			req.Model, req.Temperature)
+		req.Temperature = 0
+		return true
+	case "top_p":
+		if req.TopP == 0 {
+			return false
+		}
+		fmt.Fprintf(os.Stderr, "Warning: model %q rejected top_p=%v — retrying without it. "+
+			"That usually means it's a reasoning-tier model, which only accepts the default (top_p: 1). "+
+			"Set model_config.top_p: 1 on this agent (or drop top_p entirely) to stop relying on this retry.\n",
+			req.Model, req.TopP)
+		req.TopP = 0
+		return true
+	default:
+		return false
+	}
 }
 
 // setMaxTokens routes the token-limit onto whichever field the model
@@ -204,7 +265,17 @@ func (p *Provider) generate(
 	// Call the API
 	resp, err := p.client.CreateChatCompletion(ctx, req)
 	if err != nil {
-		return nil, wrapAPIError("openai API error", err)
+		wrapped := wrapAPIError("openai API error", err)
+		if !omitRejectedParam(&req, wrapped) {
+			return nil, wrapped
+		}
+		// Retry exactly once with the rejected field omitted — see
+		// omitRejectedParam's doc for why this is safer than guessing ahead
+		// of time which models are reasoning-tier.
+		resp, err = p.client.CreateChatCompletion(ctx, req)
+		if err != nil {
+			return nil, wrapAPIError("openai API error", err)
+		}
 	}
 
 	// Parse the response
@@ -354,7 +425,17 @@ func (p *Provider) GenerateStream(
 
 	stream, err := p.client.CreateChatCompletionStream(ctx, req)
 	if err != nil {
-		return nil, wrapAPIError("openai stream error", err)
+		wrapped := wrapAPIError("openai stream error", err)
+		if !omitRejectedParam(&req, wrapped) {
+			return nil, wrapped
+		}
+		// Retry exactly once with the rejected field omitted — see
+		// omitRejectedParam's doc for why this is safer than guessing ahead
+		// of time which models are reasoning-tier.
+		stream, err = p.client.CreateChatCompletionStream(ctx, req)
+		if err != nil {
+			return nil, wrapAPIError("openai stream error", err)
+		}
 	}
 
 	chunksCh := make(chan llm.StreamChunk, 64)
