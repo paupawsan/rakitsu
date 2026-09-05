@@ -865,6 +865,7 @@ tools:
     description: Search for relevant content in knowledge base files
     operation: search
     allowed_paths: ["./knowledge-base/"]
+    working_dir: "./knowledge-base/"
     parameters:
       path:
         type: string
@@ -880,6 +881,7 @@ tools:
     description: Read a specific knowledge base document
     operation: read
     allowed_paths: ["./knowledge-base/"]
+    working_dir: "./knowledge-base/"
     parameters:
       path:
         type: string
@@ -951,6 +953,7 @@ type: fs
 description: Search for relevant content in knowledge base files
 operation: search
 allowed_paths: ["./knowledge-base/"]
+working_dir: "./knowledge-base/"
 parameters:
   path:
     type: string
@@ -966,6 +969,7 @@ type: fs
 description: Read a specific knowledge base document
 operation: read
 allowed_paths: ["./knowledge-base/"]
+working_dir: "./knowledge-base/"
 parameters:
   path:
     type: string

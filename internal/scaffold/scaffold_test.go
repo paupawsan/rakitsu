@@ -437,6 +437,60 @@ func contains(ss []string, target string) bool {
 	return false
 }
 
+// Regression: search_files and read_file in the rag-assistant preset fence
+// relative paths to allowed_paths: ["./knowledge-base/"] but set no
+// working_dir. internal/tools/fs no longer defaults working_dir to
+// allowedPaths[0] (see #28) -- without an explicit
+// working_dir, a bare relative path like "doc1.md" now resolves against the
+// process cwd instead of the knowledge-base fence and gets rejected. Both
+// tools need working_dir: "./knowledge-base/" set explicitly.
+func TestRAGAssistantPreset_ToolsHaveWorkingDir(t *testing.T) {
+	preset := Presets["rag-assistant"]
+
+	rendered, err := Render(preset, testData, false)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	var raw struct {
+		Tools []struct {
+			Name       string `yaml:"name"`
+			WorkingDir string `yaml:"working_dir"`
+		} `yaml:"tools"`
+	}
+	if err := yaml.Unmarshal([]byte(rendered["rag-assistant.yaml"]), &raw); err != nil {
+		t.Fatalf("unmarshal single-file: %v", err)
+	}
+	wantTools := map[string]bool{"search_files": false, "read_file": false}
+	for _, tool := range raw.Tools {
+		if _, ok := wantTools[tool.Name]; !ok {
+			continue
+		}
+		wantTools[tool.Name] = true
+		if tool.WorkingDir == "" {
+			t.Errorf("single-file: %s should have working_dir set", tool.Name)
+		}
+	}
+	for name, found := range wantTools {
+		if !found {
+			t.Errorf("single-file: %s tool not found", name)
+		}
+	}
+
+	dirFiles, err := Render(preset, testData, true)
+	if err != nil {
+		t.Fatalf("Render(dir): %v", err)
+	}
+	for _, relPath := range []string{"tools/search-files.yaml", "tools/read-file.yaml"} {
+		content, ok := dirFiles[relPath]
+		if !ok {
+			t.Fatalf("missing dir file %s", relPath)
+		}
+		if !strings.Contains(content, "working_dir") {
+			t.Errorf("dir-file %s should have working_dir set", relPath)
+		}
+	}
+}
+
 // ============================================================
 // Preset name / ID parity
 // ============================================================
