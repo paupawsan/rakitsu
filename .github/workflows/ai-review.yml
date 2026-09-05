@@ -1,0 +1,120 @@
+# SECURITY INVARIANT — read before editing this file: no field that can
+# contain attacker-chosen free text (comment body, PR title/body, commit
+# messages) is ever interpolated with ${{ }} directly into a `run:` shell
+# block below. That's the actual GitHub Actions "script injection" bug
+# class — a value substituted into script text before bash even runs it,
+# letting a crafted string break out and execute arbitrary commands in a
+# job that has OPENAI_API_KEY in its environment. Every ${{ }} used inside
+# a `run:` block here is either a fixed enum GitHub sets itself
+# (event_name, event.action), an integer (a PR/issue number), a git SHA,
+# this repo's own name, or a `steps.*.outputs.*` value this workflow
+# computed itself server-side — never raw user text. `github.event.comment.
+# body` appears ONLY inside the job-level `if:` via `startsWith(...)`,
+# which GitHub evaluates as an expression, not as shell text — that usage
+# is safe. If you ever need to reference comment/PR-title/body text from a
+# `run:` step, pass it through `env:` (a real env var, not string
+# substitution) and read it from `$THE_VAR` in the script — never `${{ }}`
+# it directly into the script source.
+name: AI PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to review'
+        required: true
+        type: number
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: >
+      (github.event_name == 'pull_request' &&
+       contains(fromJSON('["OWNER","COLLABORATOR","MEMBER"]'), github.event.pull_request.author_association)) ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       startsWith(github.event.comment.body, '/review') &&
+       contains(fromJSON('["OWNER","COLLABORATOR","MEMBER"]'), github.event.comment.author_association)) ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Resolve PR
+        id: resolve
+        run: |
+          case "${{ github.event_name }}" in
+            pull_request) NUM="${{ github.event.pull_request.number }}" ;;
+            issue_comment) NUM="${{ github.event.issue.number }}" ;;
+            workflow_dispatch) NUM="${{ inputs.pr_number }}" ;;
+          esac
+          gh pr view "$NUM" --repo "${{ github.repository }}" \
+            --json number,state,headRefOid,baseRefOid > pr.json
+          if [ "$(jq -r .state < pr.json)" != "OPEN" ]; then
+            echo "PR #$NUM is not open — refusing to review." >&2
+            exit 1
+          fi
+          echo "number=$NUM" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$(jq -r .headRefOid < pr.json)" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$(jq -r .baseRefOid < pr.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Determine diff mode
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ github.event.action }}" = "synchronize" ]; then
+            echo "mode=incremental" >> "$GITHUB_OUTPUT"
+            echo "base=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+            echo "head=${{ github.event.after }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+            echo "base=${{ steps.resolve.outputs.base_sha }}" >> "$GITHUB_OUTPUT"
+            echo "head=${{ steps.resolve.outputs.head_sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ steps.resolve.outputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install latest rakitsu release
+        run: |
+          TAG=$(gh release list --repo "${{ github.repository }}" --limit 1 --json tagName -q '.[0].tagName')
+          gh release download "$TAG" --repo "${{ github.repository }}" \
+            --pattern 'rakitsu-linux-amd64' --pattern 'checksums.txt' --clobber
+          grep linux-amd64 checksums.txt | shasum -a 256 -c -
+          sudo install -m 755 rakitsu-linux-amd64 /usr/local/bin/rakitsu
+
+      - name: Run review
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          scripts/ci-review.sh \
+            "${{ steps.mode.outputs.mode }}" \
+            "${{ steps.mode.outputs.base }}" \
+            "${{ steps.mode.outputs.head }}" \
+            review-body.md
+
+      - name: Post review
+        run: |
+          python3 -c "
+          import json
+          body = open('review-body.md').read()
+          payload = {'commit_id': '${{ steps.resolve.outputs.head_sha }}', 'event': 'COMMENT', 'body': body}
+          json.dump(payload, open('review-payload.json', 'w'))
+          "
+          gh api --method POST \
+            "repos/${{ github.repository }}/pulls/${{ steps.resolve.outputs.number }}/reviews" \
+            --input review-payload.json
