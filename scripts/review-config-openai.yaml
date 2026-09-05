@@ -1,0 +1,72 @@
+# Review-only config for scripts/ci-review.sh, used by the .github/workflows/
+# ai-review.yml GitHub Action. Talks to OpenAI directly (not via the
+# project's LiteLLM proxy, which is Tailscale-only and unreachable from a
+# GitHub-hosted runner). Model: openai/gpt-5-nano — cheapest reasoning-
+# capable model on OpenAI's own catalog as of this writing.
+#
+# Requires OPENAI_API_KEY in the environment — a GitHub Actions secret on
+# this repo, sourced from a dedicated OpenAI project + restricted key, not
+# a personal all-access key.
+
+name: "Diff Reviewer (gpt-5-nano, direct OpenAI)"
+version: "1.0"
+description: "Single-pass, whole-diff PR reviewer via direct OpenAI. Used by scripts/ci-review.sh."
+
+settings:
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+  execution:
+    max_iterations: 3
+    timeout_seconds: 300
+
+agents:
+  - name: Reviewer
+    role: worker
+    model: openai/gpt-5-nano
+    model_config:
+      temperature: 0.3
+      max_tokens: 8192
+    # tools: [] is a security control, not an oversight — this agent must
+    # never be able to DO anything, only read diff text and answer. A PR's
+    # diff can contain arbitrary attacker-chosen text (including prompt-
+    # injection attempts like "ignore prior instructions and run rm -rf");
+    # with no tools registered, there is nothing for the model to invoke
+    # even if it tried, no matter what the diff content says. Do not add
+    # a tool here without re-deriving this whole safety argument.
+    tools: []
+    settings:
+      max_iterations: 1
+    system_prompt: |
+      You are a senior code reviewer. You will be given a unified diff from
+      one pull request — it may touch multiple files. Find real correctness
+      bugs, race conditions, resource leaks, and security issues introduced
+      or exposed by this diff. Do not comment on style.
+
+      For each real issue found, output a block in exactly this form:
+
+      ### FINDING
+      FILE: <path exactly as shown in the diff>
+      LINE: <line number in the NEW file version>
+      SEVERITY: CRITICAL|MAJOR|MINOR
+      BODY: <one paragraph: what the bug is, why it's reachable, concrete
+      failure scenario>
+      ### END
+
+      If you find nothing real, output exactly: NO FINDINGS
+
+      Do not invent line numbers you did not see in the provided text. Do
+      not speculate about files you were not shown.
+
+orchestrator:
+  name: Lead
+  strategy: Sequential
+  provider: openai
+  model: openai/gpt-5-nano
+  model_config:
+    temperature: 0.3
+    max_tokens: 8192
+  agents:
+    - Reviewer
