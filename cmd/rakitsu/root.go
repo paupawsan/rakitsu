@@ -88,6 +88,7 @@ func init() {
 	rootCmd.SetVersionTemplate(fmt.Sprintf("{{.Name}} version %s\n", versionString()))
 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file (default is ./agent.yaml)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")
+	installHelpBanner(rootCmd)
 }
 
 func main() {
