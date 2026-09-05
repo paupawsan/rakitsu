@@ -197,9 +197,25 @@ func splitCommand(s string) []string {
 	return parts
 }
 
+// reExecCommands re-invoke a later word in their own segment as the actual
+// command to run, unlike `git mv`/`git init`, where the later word is git's
+// own subcommand vocabulary and never executes as a standalone command. A
+// blocked command hiding behind one of these must still be caught even
+// though it isn't the segment's first word.
+var reExecCommands = map[string]bool{
+	"xargs": true,
+	"find":  true, // via -exec
+	"env":   true,
+}
+
 // lintShellPayload does a best-effort scan of a shell -c payload for
-// standalone invocations of commands in blockedCommands. It matches only
-// whole tokens (so `--grep "arm64"` doesn't trip on the "rm" substring).
+// invocations of commands in blockedCommands. It checks only the FIRST word
+// of each command segment (so `--grep "arm64"` doesn't trip on the "rm"
+// substring, and `git init`/`git mv` don't trip on git's own subcommand
+// sharing a name with a blocked command — a later word in a segment is
+// normally an argument, not an invocation) — except for reExecCommands,
+// where every word in the segment is checked, since those genuinely
+// re-invoke a later word as a command.
 // Returns a non-nil error describing the first blocked command found.
 //
 // Security note: this is a footgun fence, NOT a security boundary. A
@@ -208,20 +224,37 @@ func splitCommand(s string) []string {
 // obvious mistakes, not to defend against hostile configs. Rakitsu
 // ultimately runs as the local user with the user's trust.
 func lintShellPayload(payload string) error {
-	// Tokenize on shell metacharacters and whitespace so that `; rm -rf /`
-	// and `git log && rm` both expose "rm" as a standalone token.
-	tokenSep := func(r rune) bool {
+	// Split into command segments wherever a shell command-separator
+	// appears (`;`, `&&`, `||`, `|`, a subshell/backtick boundary, or a
+	// newline). Redirect operators (`<`, `>`) are deliberately NOT
+	// segment separators: their target is a filename argument, never a
+	// command, so `echo hi > rm` must not flag "rm".
+	segSep := func(r rune) bool {
 		switch r {
-		case ' ', '\t', '\n', ';', '|', '&', '(', ')', '<', '>', '`':
+		case ';', '|', '&', '(', ')', '`', '\n':
 			return true
 		}
 		return false
 	}
-	for _, tok := range strings.FieldsFunc(payload, tokenSep) {
-		// Strip leading $() or backticks artifacts — best-effort
-		tok = strings.TrimLeft(tok, "$(")
+	for _, segment := range strings.FieldsFunc(payload, segSep) {
+		fields := strings.Fields(segment)
+		if len(fields) == 0 {
+			continue
+		}
+		// Only the first word of a segment is normally a command
+		// invocation; strip a leading "$" artifact from command
+		// substitution ($cmd).
+		tok := strings.TrimLeft(fields[0], "$")
 		if blockedCommands[tok] {
 			return fmt.Errorf("shell payload contains blocked command %q", tok)
+		}
+		if reExecCommands[tok] {
+			for _, w := range fields[1:] {
+				w = strings.TrimLeft(w, "$")
+				if blockedCommands[w] {
+					return fmt.Errorf("shell payload contains blocked command %q", w)
+				}
+			}
 		}
 	}
 	return nil
