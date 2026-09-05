@@ -252,7 +252,7 @@ license.
 
 ## License
 
-BSL 1.1 — See [LICENSE](LICENSE) for details. Converts to Apache 2.0 after 4 years.
+BSL 1.1 — See [LICENSE](LICENSE) for details. Each release converts to Apache 2.0 four years after *that version's* first publication, not on one fixed date for the whole project — see [RELEASE-NOTES.md](RELEASE-NOTES.md) for per-version dates.
 
 **AI tooling**: see [`AI_USE_NOTICE.md`](AI_USE_NOTICE.md). Reading and personal study with AI tools is fine; AI-accelerated competitive reimplementation is subject to the BSL non-compete clause.
 
