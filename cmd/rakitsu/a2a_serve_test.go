@@ -408,6 +408,62 @@ func TestAgentCardHandler_URLFallsBackWhenHostEmpty(t *testing.T) {
 	}
 }
 
+// TestAgentCardHandler_SecuritySchemesWhenTokenConfigured covers issue #22
+// item 3: docs/SECURITY.md justifies leaving the agent-card route
+// unauthenticated on the grounds a client can learn what auth is required
+// before authenticating — but the card conveyed nothing, so that claim
+// wasn't actually true. When RAKITSU_API_TOKEN is set, the card must
+// advertise the bearer requirement.
+func TestAgentCardHandler_SecuritySchemesWhenTokenConfigured(t *testing.T) {
+	t.Setenv("RAKITSU_API_TOKEN", "s3cret")
+	handler := agentCardHandlerFunc(testConfig(), "http://example.com/a2a")
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/agent-card.json", nil)
+	req.Host = "example.com"
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	var card srvAgentCard
+	if err := json.NewDecoder(rr.Body).Decode(&card); err != nil {
+		t.Fatalf("decode agent card: %v", err)
+	}
+	scheme, ok := card.SecuritySchemes["bearerAuth"]
+	if !ok {
+		t.Fatalf("securitySchemes missing bearerAuth entry, got %+v", card.SecuritySchemes)
+	}
+	if scheme.Type != "http" || scheme.Scheme != "bearer" {
+		t.Errorf("bearerAuth scheme = %+v, want type=http scheme=bearer", scheme)
+	}
+	if len(card.Security) != 1 {
+		t.Fatalf("security = %+v, want one requirement entry", card.Security)
+	}
+	if _, ok := card.Security[0]["bearerAuth"]; !ok {
+		t.Errorf("security[0] = %+v, want it to reference bearerAuth", card.Security[0])
+	}
+}
+
+// TestAgentCardHandler_NoSecuritySchemesWhenTokenNotConfigured covers the
+// common loopback-no-token case: the card must not claim an auth
+// requirement that doesn't actually exist.
+func TestAgentCardHandler_NoSecuritySchemesWhenTokenNotConfigured(t *testing.T) {
+	t.Setenv("RAKITSU_API_TOKEN", "")
+	handler := agentCardHandlerFunc(testConfig(), "http://example.com/a2a")
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/agent-card.json", nil)
+	req.Host = "example.com"
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	var card srvAgentCard
+	if err := json.NewDecoder(rr.Body).Decode(&card); err != nil {
+		t.Fatalf("decode agent card: %v", err)
+	}
+	if len(card.SecuritySchemes) != 0 {
+		t.Errorf("securitySchemes = %+v, want none when no token is configured", card.SecuritySchemes)
+	}
+	if len(card.Security) != 0 {
+		t.Errorf("security = %+v, want none when no token is configured", card.Security)
+	}
+}
+
 // ─── a2aTaskStore ───────────────────────────────────────────────────────────
 
 // TestA2ATaskStore_Get_ReturnsIndependentCopy covers put/get's copy being

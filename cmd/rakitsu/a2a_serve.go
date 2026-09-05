@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/paupawsan/rakitsu/internal/config"
+	"github.com/paupawsan/rakitsu/internal/server"
 )
 
 // ─── Server-side A2A JSON-RPC types (A2A v1.0.1, github.com/a2aproject/A2A) ──
@@ -155,6 +156,19 @@ type srvAgentCard struct {
 	DefaultInputModes   []string             `json:"defaultInputModes"`
 	DefaultOutputModes  []string             `json:"defaultOutputModes"`
 	Skills              []srvAgentSkill      `json:"skills"`
+	// SecuritySchemes/Security are populated only when RAKITSU_API_TOKEN is
+	// configured — omitted entirely otherwise, so the card never claims an
+	// auth requirement that doesn't exist. See buildAgentCard.
+	SecuritySchemes map[string]srvSecurityScheme `json:"securitySchemes,omitempty"`
+	Security        []map[string][]string        `json:"security,omitempty"`
+}
+
+// srvSecurityScheme is the OpenAPI-style HTTP-bearer scheme A2A's
+// securitySchemes field expects — the only scheme rakitsu's /a2a ever
+// requires (AuthMiddleware checks "Authorization: Bearer <token>").
+type srvSecurityScheme struct {
+	Type   string `json:"type"`
+	Scheme string `json:"scheme"`
 }
 
 type srvAgentInterface struct {
@@ -506,11 +520,15 @@ func agentCardHandlerFunc(cfg *config.Config, fallbackURL string) http.HandlerFu
 			selfURL = fmt.Sprintf("%s://%s/a2a", scheme, r.Host)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(buildAgentCard(cfg, selfURL)) //nolint:errcheck
+		json.NewEncoder(w).Encode(buildAgentCard(cfg, selfURL, server.TokenConfigured())) //nolint:errcheck
 	}
 }
 
-func buildAgentCard(cfg *config.Config, selfURL string) srvAgentCard {
+// buildAgentCard assembles the advertised card. authRequired is passed in
+// (rather than read from the environment here) so buildAgentCard stays a
+// pure function of its inputs — server.TokenConfigured() is the one place
+// that actually reads RAKITSU_API_TOKEN.
+func buildAgentCard(cfg *config.Config, selfURL string, authRequired bool) srvAgentCard {
 	skills := make([]srvAgentSkill, 0, len(cfg.Agents))
 	for _, a := range cfg.Agents {
 		skills = append(skills, srvAgentSkill{
@@ -534,7 +552,7 @@ func buildAgentCard(cfg *config.Config, selfURL string) srvAgentCard {
 		version = "1.0.0"
 	}
 
-	return srvAgentCard{
+	card := srvAgentCard{
 		Name:        name,
 		Description: desc,
 		Version:     version,
@@ -549,4 +567,17 @@ func buildAgentCard(cfg *config.Config, selfURL string) srvAgentCard {
 		DefaultOutputModes: []string{"text/plain"},
 		Skills:             skills,
 	}
+
+	// Only advertise the requirement when it's real — RAKITSU_API_TOKEN
+	// unset means AuthMiddleware is a pass-through, and a card claiming
+	// bearer auth in that case would mislead a client into sending a
+	// credential nothing checks.
+	if authRequired {
+		card.SecuritySchemes = map[string]srvSecurityScheme{
+			"bearerAuth": {Type: "http", Scheme: "bearer"},
+		}
+		card.Security = []map[string][]string{{"bearerAuth": {}}}
+	}
+
+	return card
 }

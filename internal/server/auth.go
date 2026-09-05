@@ -64,6 +64,15 @@ func (e *bindRefusedError) Error() string {
 		"Set " + apiTokenEnv + "=<token> to enable network exposure, or bind localhost."
 }
 
+// TokenConfigured reports whether RAKITSU_API_TOKEN is set in this process's
+// environment — i.e. whether AuthMiddleware is actively enforcing it on
+// control-plane endpoints right now. Exported so callers outside this
+// package (the A2A agent card builder) can advertise the same requirement a
+// client would otherwise only discover by hitting a 401.
+func TokenConfigured() bool {
+	return os.Getenv(apiTokenEnv) != ""
+}
+
 // requiresAuth reports whether a request targets a control-plane endpoint that
 // must be authenticated when an API token is configured. The set is limited to
 // endpoints that can execute code, mutate runs/configs, drive the debugger, or

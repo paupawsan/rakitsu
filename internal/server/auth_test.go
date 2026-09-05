@@ -26,6 +26,17 @@ func TestIsLoopbackHost(t *testing.T) {
 	}
 }
 
+func TestTokenConfigured(t *testing.T) {
+	t.Setenv(apiTokenEnv, "")
+	if TokenConfigured() {
+		t.Error("TokenConfigured() = true with no token set")
+	}
+	t.Setenv(apiTokenEnv, "s3cret")
+	if !TokenConfigured() {
+		t.Error("TokenConfigured() = false with a token set")
+	}
+}
+
 func TestRequireBindAllowed(t *testing.T) {
 	// Loopback never needs a token.
 	t.Setenv(apiTokenEnv, "")
@@ -69,9 +80,9 @@ func TestRequiresAuth(t *testing.T) {
 		{"POST", "/api/debug/params"},
 		{"GET", "/api/debug/state"},
 		{"DELETE", "/api/configs/abc123"},
-		{"POST", "/mcp"},          // MCP executes arbitrary registered tools, no auth of its own
-		{"POST", "/mcp/anything"}, // standalone --mcp-port server has nothing else mounted on it
-		{"POST", "/a2a"},          // same shape as MCP: full tool-execution surface
+		{"POST", "/mcp"},                     // MCP executes arbitrary registered tools, no auth of its own
+		{"POST", "/mcp/anything"},            // standalone --mcp-port server has nothing else mounted on it
+		{"POST", "/a2a"},                     // same shape as MCP: full tool-execution surface
 		{"GET", "/api/providers/models"},     // outbound-request proxy, SSRF-adjacent
 		{"GET", "/api/providers/model-info"}, // same endpoint shape as above
 	}

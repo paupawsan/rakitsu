@@ -99,8 +99,13 @@ The same token also satisfies cross-session messaging
   matches both by path). The Agent Card discovery route
   (`/.well-known/agent-card.json`) is deliberately left open — the A2A spec
   expects it to be publicly fetchable so a client can learn what auth is
-  required before authenticating. The non-loopback bind refusal remains the
-  backstop for all of it — keep it behind a tunnel or a trusted network.
+  required before authenticating, and the card advertises the requirement
+  (`securitySchemes`/`security`) whenever `RAKITSU_API_TOKEN` is set. An
+  `a2a`-type tool delegating to a token-gated peer supplies the credential
+  via its own `api_key` field (`${VAR}`-expanded like provider `api_key`
+  values), sent as `Authorization: Bearer <api_key>`. The non-loopback bind
+  refusal remains the backstop for all of it — keep it behind a tunnel or a
+  trusted network.
 - WebSocket upgrades are restricted to localhost/same-origin (so a random web
   page cannot drive your agent), but there is no CSRF token on same-origin
   POSTs yet.
