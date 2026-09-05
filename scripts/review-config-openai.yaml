@@ -12,6 +12,20 @@
 # Requires OPENAI_API_KEY in the environment — a GitHub Actions secret on
 # this repo, sourced from a dedicated OpenAI project + restricted key, not
 # a personal all-access key.
+#
+# Deliberately no `orchestrator:` block. `strategy: Sequential` isn't a
+# real orchestrator strategy (only "Pipeline" is special-cased in
+# internal/agent/orchestrator.go; anything else, including "Sequential",
+# silently falls through to the ReAct branch) — that path builds its own
+# LLM-driven supervisor agent that delegates to Reviewer via a tool call
+# and then free-writes its own "comprehensive answer" on top of it,
+# wrecking the strict FINDING/NO-FINDINGS contract below no matter how the
+# Reviewer's own prompt is worded (confirmed live: the supervisor narrated
+# a chatty essay even when Reviewer's own answer was a clean NO FINDINGS).
+# With no `orchestrator:` key, `rakitsu run` takes the single-agent path
+# and prints Reviewer's raw text as-is — see examples/single/01-chat for
+# the same no-orchestrator shape. Do not add an orchestrator back without
+# re-deriving this.
 
 name: "Diff Reviewer (gpt-5-nano, direct OpenAI)"
 version: "1.0"
@@ -72,14 +86,3 @@ agents:
       follow-up turn: phrases like "if you'd like" or "let me know" are
       never appropriate here, since nothing will ever read a reply to
       them.
-
-orchestrator:
-  name: Lead
-  strategy: Sequential
-  provider: openai
-  model: gpt-5-nano
-  model_config:
-    temperature: 0.3
-    max_tokens: 8192
-  agents:
-    - Reviewer
