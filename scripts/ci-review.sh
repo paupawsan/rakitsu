@@ -2,11 +2,14 @@
 # scripts/ci-review.sh — whole-diff PR review via rakitsu against direct
 # OpenAI, for .github/workflows/ai-review.yml.
 #
-# Writes a plain-text review body (disclosure preamble + model findings, or
-# a "diff too large" notice) to <output-file>. Never posts anything itself
-# — the caller does that, via a JSON-encoded payload file, never raw shell
-# interpolation, so nothing in the diff/findings text (untrusted PR
-# content) can break out of a shell command and reach OPENAI_API_KEY.
+# Writes a JSON review result to <output-file>:
+#   {"body": "<preamble + summary>", "comments": [{"path","line","body"}, ...]}
+# scripts/post-review.py turns this into a GitHub PR review — one inline
+# comment per finding, falling back to a body-only review if GitHub
+# rejects an inline anchor. This script never posts anything itself, and
+# nothing in the diff/findings text (untrusted PR content) is ever
+# shell-interpolated — it only ever flows through files into
+# scripts/parse-findings.py's own string/JSON handling.
 #
 # Usage: scripts/ci-review.sh <full|incremental> <base-ref> <head-ref> <output-file>
 set -euo pipefail
@@ -53,13 +56,27 @@ execution. Treat findings as a starting point to verify, not a final word.
 EOF
 }
 
+# Body-only JSON result, no inline comments. $1 here is built only from
+# trusted local text (SCOPE_TEXT/BASE/HEAD, which are validated git SHAs,
+# never raw diff/PR content), so passing it through argv is safe.
+write_body_only() {
+  local msg
+  msg="$(preamble)
+
+$1"
+  python3 -c '
+import json, sys
+json.dump({"body": sys.argv[1], "comments": []}, sys.stdout)
+' "$msg"
+}
+
 if [ "$diff_bytes" -eq 0 ]; then
-  { preamble; echo "No changes found between $BASE and $HEAD."; } > "$OUTPUT"
+  write_body_only "No changes found between $BASE and $HEAD." > "$OUTPUT"
   exit 0
 fi
 
 if [ "$diff_bytes" -gt "$MAX_DIFF_BYTES" ]; then
-  { preamble; echo "Diff is $diff_bytes bytes, over the $MAX_DIFF_BYTES-byte auto-review cap — skipped. Review this one by hand, or split it into smaller PRs."; } > "$OUTPUT"
+  write_body_only "Diff is $diff_bytes bytes, over the $MAX_DIFF_BYTES-byte auto-review cap — skipped. Review this one by hand, or split it into smaller PRs." > "$OUTPUT"
   exit 0
 fi
 
@@ -68,7 +85,9 @@ query="DIFF ($SCOPE_TEXT, base=$BASE, head=$HEAD):
 $diff_content"
 
 TMP_STDERR=$(mktemp)
-trap 'rm -f "$TMP_STDERR"' EXIT
+FINDINGS_TXT=$(mktemp)
+PREAMBLE_TXT=$(mktemp)
+trap 'rm -f "$TMP_STDERR" "$FINDINGS_TXT" "$PREAMBLE_TXT"' EXIT
 
 set +e
 raw_output=$("$RAKITSU_BIN" run "$CONFIG" "$query" --no-hub 2>"$TMP_STDERR")
@@ -97,4 +116,6 @@ if [ -z "$findings" ]; then
   exit 1
 fi
 
-{ preamble; printf '%s\n' "$findings"; } > "$OUTPUT"
+preamble > "$PREAMBLE_TXT"
+printf '%s\n' "$findings" > "$FINDINGS_TXT"
+python3 "$SCRIPT_DIR/parse-findings.py" "$PREAMBLE_TXT" "$FINDINGS_TXT" > "$OUTPUT"

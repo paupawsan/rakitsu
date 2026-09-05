@@ -105,16 +105,11 @@ jobs:
             "${{ steps.mode.outputs.mode }}" \
             "${{ steps.mode.outputs.base }}" \
             "${{ steps.mode.outputs.head }}" \
-            review-body.md
+            review-result.json
 
       - name: Post review
         run: |
-          python3 -c "
-          import json
-          body = open('review-body.md').read()
-          payload = {'commit_id': '${{ steps.resolve.outputs.head_sha }}', 'event': 'COMMENT', 'body': body}
-          json.dump(payload, open('review-payload.json', 'w'))
-          "
-          gh api --method POST \
-            "repos/${{ github.repository }}/pulls/${{ steps.resolve.outputs.number }}/reviews" \
-            --input review-payload.json
+          python3 scripts/post-review.py review-result.json \
+            "${{ github.repository }}" \
+            "${{ steps.resolve.outputs.number }}" \
+            "${{ steps.resolve.outputs.head_sha }}"
