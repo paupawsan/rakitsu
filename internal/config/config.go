@@ -298,6 +298,12 @@ type ToolDefinition struct {
 	Transport string   `mapstructure:"transport,omitempty" yaml:"transport,omitempty"` // "stdio" or "http"
 	// A2A fields (type: a2a)
 	AgentName string `mapstructure:"agent,omitempty" yaml:"agent,omitempty"` // remote agent name to delegate to
+	// APIKey authenticates against a peer's /a2a endpoint (RAKITSU_API_TOKEN
+	// or any bearer token an A2A server requires) — sent as
+	// "Authorization: Bearer <APIKey>". Expanded the same as provider
+	// api_key values (${VAR} / ${VAR:-default}); see the expansion loop in
+	// Load below.
+	APIKey string `mapstructure:"api_key,omitempty" yaml:"api_key,omitempty"`
 }
 
 // Parameter defines a tool parameter
@@ -672,6 +678,18 @@ func Load(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to resolve file references: %w", err)
 	}
 
+	// Expand environment variables in tool definitions' credentials (a2a's
+	// api_key). Runs after auto-discovery so tools loaded from conventional
+	// directories get expanded too, not just inline ones.
+	for i := range config.Tools {
+		config.Tools[i].APIKey = expandEnvVar(config.Tools[i].APIKey)
+	}
+	for ai := range config.Agents {
+		for ti := range config.Agents[ai].ToolsInline {
+			config.Agents[ai].ToolsInline[ti].APIKey = expandEnvVar(config.Agents[ai].ToolsInline[ti].APIKey)
+		}
+	}
+
 	// Validate the config. Errors block load; warnings are logged and ignored.
 	if errs := config.Validate(); len(errs) > 0 {
 		for _, e := range errs {
@@ -888,6 +906,8 @@ func (c *Config) GetSkill(name string) *SkillDefinition {
 // Fields redacted:
 //   - Settings.Providers[*].APIKey
 //   - Settings.APIKeys[*] values
+//   - Tools[*].APIKey and every Agents[*].ToolsInline[*].APIKey (a2a tool
+//     credentials)
 //
 // URLs, credentials-file paths, model names, and agent prompts are not
 // redacted — they are configuration structure, not secrets.
@@ -918,6 +938,18 @@ func Redacted(c *Config) *Config {
 	for k, v := range cp.Settings.APIKeys {
 		if v != "" {
 			cp.Settings.APIKeys[k] = mask
+		}
+	}
+	for i := range cp.Tools {
+		if cp.Tools[i].APIKey != "" {
+			cp.Tools[i].APIKey = mask
+		}
+	}
+	for ai := range cp.Agents {
+		for ti := range cp.Agents[ai].ToolsInline {
+			if cp.Agents[ai].ToolsInline[ti].APIKey != "" {
+				cp.Agents[ai].ToolsInline[ti].APIKey = mask
+			}
 		}
 	}
 	return &cp

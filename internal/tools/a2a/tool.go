@@ -122,6 +122,7 @@ type A2ATool struct {
 	desc       string
 	endpoint   string // base URL of the remote rakitsu, e.g. "http://host:9100"
 	agentName  string
+	apiKey     string // sent as "Authorization: Bearer <apiKey>" when non-empty
 	httpClient *http.Client
 	nextID     atomic.Int64
 }
@@ -242,6 +243,9 @@ func (t *A2ATool) call(ctx context.Context, method string, params interface{}, o
 		return fmt.Errorf("a2a %q: build request: %w", t.name, err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if t.apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+t.apiKey)
+	}
 
 	resp, err := t.httpClient.Do(httpReq)
 	if err != nil {
@@ -305,6 +309,7 @@ func NewA2ATool(def *config.ToolDefinition) (*A2ATool, error) {
 		desc:      desc,
 		endpoint:  def.URL,
 		agentName: def.AgentName,
+		apiKey:    def.APIKey,
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},

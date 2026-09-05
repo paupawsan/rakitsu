@@ -434,3 +434,63 @@ func TestA2ATool_NumericResponseID_Decodes(t *testing.T) {
 		t.Errorf("result = %q, want %q", result, "ok")
 	}
 }
+
+// ─── credential (issue #22 item 1) ─────────────────────────────────────────
+
+// TestA2ATool_SendsAuthorizationHeaderWhenAPIKeyConfigured covers the
+// missing half of #22: the a2a tool had no way to authenticate against a
+// token-gated peer at all. An APIKey on the tool definition must become a
+// real "Authorization: Bearer <key>" header on every call.
+func TestA2ATool_SendsAuthorizationHeaderWhenAPIKeyConfigured(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		task := completedTask("t1", "ok")
+		result, _ := json.Marshal(a2aSendMessageResult{Task: &task})                                       //nolint:errcheck
+		json.NewEncoder(w).Encode(a2aResponse{JSONRPC: "2.0", ID: json.RawMessage(`"1"`), Result: result}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	tool, err := NewA2ATool(&config.ToolDefinition{
+		Name:      "test_tool",
+		URL:       srv.URL,
+		AgentName: "Researcher",
+		APIKey:    "secret-token-123",
+	})
+	if err != nil {
+		t.Fatalf("NewA2ATool: %v", err)
+	}
+	if _, err := tool.Execute(context.Background(), map[string]interface{}{"query": "q"}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if want := "Bearer secret-token-123"; gotAuth != want {
+		t.Errorf("Authorization header = %q, want %q", gotAuth, want)
+	}
+}
+
+// TestA2ATool_NoAuthorizationHeaderWhenAPIKeyEmpty preserves today's
+// unauthenticated behavior for the common case (loopback peer, no token
+// configured) — an empty APIKey must not send a header at all, not an
+// empty "Authorization: Bearer " one.
+func TestA2ATool_NoAuthorizationHeaderWhenAPIKeyEmpty(t *testing.T) {
+	headerSet := true // starts true so "never called" would fail loudly
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, headerSet = r.Header["Authorization"]
+		w.Header().Set("Content-Type", "application/json")
+		task := completedTask("t1", "ok")
+		result, _ := json.Marshal(a2aSendMessageResult{Task: &task})                                       //nolint:errcheck
+		json.NewEncoder(w).Encode(a2aResponse{JSONRPC: "2.0", ID: json.RawMessage(`"1"`), Result: result}) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	tool := newTool(t, srv, "Researcher", "")
+	if _, err := tool.Execute(context.Background(), map[string]interface{}{"query": "q"}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	if headerSet {
+		t.Error("expected no Authorization header when APIKey is empty")
+	}
+}

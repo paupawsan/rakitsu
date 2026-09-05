@@ -263,6 +263,18 @@ func TestRedacted(t *testing.T) {
 				"litellm": "https://example.com/v1",
 			},
 		},
+		Tools: []ToolDefinition{
+			{Name: "delegate", Type: "a2a", APIKey: "a2a-secret-global"},
+			{Name: "no-key", Type: "a2a"},
+		},
+		Agents: []AgentDefinition{
+			{
+				Name: "Coordinator",
+				ToolsInline: []ToolDefinition{
+					{Name: "delegate_inline", Type: "a2a", APIKey: "a2a-secret-inline"},
+				},
+			},
+		},
 	}
 
 	got := Redacted(cfg)
@@ -307,6 +319,77 @@ func TestRedacted(t *testing.T) {
 	}
 	if got.Settings.BaseURLs["litellm"] != "https://example.com/v1" {
 		t.Errorf("base_urls map lost: %q", got.Settings.BaseURLs["litellm"])
+	}
+
+	if got.Tools[0].APIKey != "[REDACTED]" {
+		t.Errorf("global a2a tool api_key not redacted: %q", got.Tools[0].APIKey)
+	}
+	if got.Tools[1].APIKey != "" {
+		t.Errorf("tool with no api_key should stay empty, got %q", got.Tools[1].APIKey)
+	}
+	if got.Agents[0].ToolsInline[0].APIKey != "[REDACTED]" {
+		t.Errorf("inline a2a tool api_key not redacted: %q", got.Agents[0].ToolsInline[0].APIKey)
+	}
+	if cfg.Tools[0].APIKey != "a2a-secret-global" {
+		t.Error("Redacted mutated caller's config (tools)")
+	}
+	if cfg.Agents[0].ToolsInline[0].APIKey != "a2a-secret-inline" {
+		t.Error("Redacted mutated caller's config (agent tools_inline)")
+	}
+}
+
+// TestLoad_A2AToolAPIKeyExpandsEnvVar covers issue #22 item 1: the a2a tool
+// type had no credential field at all, so an a2a peer gated by
+// RAKITSU_API_TOKEN was unreachable from any config. api_key needs the same
+// ${VAR} expansion provider api_key values already get — both for a
+// globally-declared tool and one declared inline on an agent, since
+// buildAgentToolRegistry (runtime.go) constructs a2a tools from either.
+func TestLoad_A2AToolAPIKeyExpandsEnvVar(t *testing.T) {
+	t.Setenv("TEST_A2A_TOKEN", "resolved-secret-abc")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	yamlContent := `
+name: a2a-expand-test
+version: "1.0"
+tools:
+  - name: delegate
+    type: a2a
+    url: http://peer.example/a2a
+    agent: Researcher
+    api_key: ${TEST_A2A_TOKEN}
+agents:
+  - name: Coordinator
+    role: worker
+    tools_inline:
+      - name: delegate_inline
+        type: a2a
+        url: http://peer2.example/a2a
+        agent: Researcher
+        api_key: ${TEST_A2A_TOKEN}
+`
+	if err := os.WriteFile(path, []byte(yamlContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	tool := cfg.GetTool("delegate")
+	if tool == nil {
+		t.Fatal("global tool \"delegate\" not found")
+	}
+	if tool.APIKey != "resolved-secret-abc" {
+		t.Errorf("global tool api_key = %q, want the expanded env var value", tool.APIKey)
+	}
+
+	if len(cfg.Agents) != 1 || len(cfg.Agents[0].ToolsInline) != 1 {
+		t.Fatalf("expected one agent with one inline tool, got agents=%d", len(cfg.Agents))
+	}
+	if got := cfg.Agents[0].ToolsInline[0].APIKey; got != "resolved-secret-abc" {
+		t.Errorf("inline tool api_key = %q, want the expanded env var value", got)
 	}
 }
 
