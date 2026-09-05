@@ -16,11 +16,20 @@ This file is the durable, git-tracked record of that date for each release —
 independent of GitHub's own release metadata, which is useful but mutable
 (a release can be deleted and recreated, changing its timestamps).
 
-| Version | First published | Converts to Apache 2.0 on |
+Timestamps are recorded to the second, in UTC, not just a calendar date — a
+bare date is ambiguous once a reader is in a different timezone than the one
+that first comes to mind (this project's own maintainers are UTC+9, where a
+release published late in the UTC day already falls on the next calendar
+day locally).
+
+| Version | First published (UTC) | Converts to Apache 2.0 (UTC) |
 |---|---|---|
-| [v0.2.0-alpha.1](https://github.com/paupawsan/rakitsu/releases/tag/v0.2.0-alpha.1) | 2026-09-05 | 2030-09-05 |
+| [v0.2.0-alpha.1](https://github.com/paupawsan/rakitsu/releases/tag/v0.2.0-alpha.1) | 2026-09-05T23:26:49Z | 2030-09-05T23:26:49Z |
 
 Add a row here whenever a new tag is released. Use the release's own
-`published_at` timestamp (visible via `gh release view <tag> --json
-publishedAt`, or the GitHub UI) as the "First published" date — not the day
-this file happens to be edited, which may not be the same day.
+`published_at` timestamp — `gh release view <tag> --json publishedAt`, or
+the GitHub UI — as the "First published" value, not the day this file
+happens to be edited, which may not be the same day. If a release is ever
+deleted and recreated (as happened once during `v0.2.0-alpha.1`'s own
+initial setup), update the row to the *recreated* release's timestamp —
+that's the one that actually counts as "first publicly distributed".
