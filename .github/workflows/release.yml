@@ -1,6 +1,9 @@
 # Cuts a GitHub Release from a `v*` tag: builds all platform binaries and
 # generates checksums.txt in the exact shape install.sh expects, and
-# uploads both plus a changelog to the release.
+# uploads both plus a changelog to the release. LICENSE and NOTICE ride
+# along as their own assets — BSL 1.1 requires the license to be
+# conspicuously displayed on each copy of the work, and a bare downloaded
+# binary is often the only place a user ever encounters this project.
 #
 # A tag push doesn't trigger ci.yml (it only watches branches: [main]), so
 # this workflow runs its own build+test+vet gate rather than relying on
@@ -109,5 +112,7 @@ jobs:
             bin/rakitsu-darwin-arm64
             bin/rakitsu-windows-amd64.exe
             bin/checksums.txt
+            LICENSE
+            NOTICE
           draft: false
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
