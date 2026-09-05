@@ -9,6 +9,7 @@ import WelcomeScreen from './components/WelcomeScreen.vue';
 import LicenseAcceptance from './components/LicenseAcceptance.vue';
 import type { DebugTreeNode } from './types';
 import { useWorkspace } from './composables/useWorkspace';
+import rakitsuMark from './assets/rakitsu-mark.svg';
 
 // Typed ref for the VisualBuilder component so we can pull the current
 // canvas YAML when the user switches to the Chat tab — see autoDetectChatConfig.
@@ -190,7 +191,7 @@ function handleSessionsDebug(sessionId: string) {
   <div class="app">
     <nav class="app-nav">
       <div class="nav-brand">
-        <span class="brand-mark">R&gt;</span>
+        <img :src="rakitsuMark" class="brand-mark" alt="Rakitsu" />
         <span class="brand-text">Rakitsu</span>
         <span v-if="serverVersion" class="brand-version">{{ serverVersion }}</span>
       </div>
@@ -355,10 +356,8 @@ body {
 }
 
 .brand-mark {
-  font-family: var(--font-mono);
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--accent-agent);
+  width: 16px;
+  height: 16px;
 }
 
 .brand-text {

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue';
+import rakitsuMark from '../assets/rakitsu-mark.svg';
 
 const emit = defineEmits<{
   'accepted': [];
@@ -12,7 +13,7 @@ const agreed = ref(false);
   <div class="license-overlay">
     <div class="license-card">
       <div class="license-brand">
-        <span class="brand-mark">R&gt;</span>
+        <img :src="rakitsuMark" class="brand-mark" alt="Rakitsu" />
         <span class="brand-name">Rakitsu</span>
       </div>
 
@@ -93,10 +94,8 @@ const agreed = ref(false);
   gap: 8px;
 }
 .brand-mark {
-  font-family: var(--font-mono);
-  font-size: 24px;
-  color: var(--accent-agent);
-  font-weight: 700;
+  width: 24px;
+  height: 24px;
 }
 .brand-name {
   font-size: 24px;

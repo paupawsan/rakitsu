@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue';
 import ComboBox from './builder/ComboBox.vue';
+import rakitsuMark from '../assets/rakitsu-mark.svg';
 
 interface DemoProvider {
   name: string;
@@ -190,7 +191,7 @@ onMounted(async () => {
   <div class="welcome-overlay">
     <div class="welcome-card">
       <div class="welcome-brand">
-        <span class="brand-mark">R&gt;</span>
+        <img :src="rakitsuMark" class="brand-mark" alt="Rakitsu" />
         <span class="brand-name">Rakitsu</span>
       </div>
       <p class="welcome-tagline">The Agent IDE</p>
@@ -323,10 +324,8 @@ onMounted(async () => {
   gap: 8px;
 }
 .brand-mark {
-  font-family: var(--font-mono);
-  font-size: 28px;
-  color: var(--accent-agent);
-  font-weight: 700;
+  width: 28px;
+  height: 28px;
 }
 .brand-name {
   font-size: 28px;
