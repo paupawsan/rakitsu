@@ -35,6 +35,7 @@ type Config struct {
 	EventBus        *telemetry.EventBus
 	AgentName       string
 	ModelName       string
+	Version         string                        // "" hides the version line in the startup banner
 	InitialQuery    string                        // optional: auto-submitted as first turn
 	UserInputReqCh  <-chan userinput.InputRequest // receives questions from user_input tool
 	UserInputRespCh chan<- string                 // sends answers back to user_input tool
@@ -129,6 +130,7 @@ type Model struct {
 	eventBus    *telemetry.EventBus
 	agentName   string
 	modelName   string
+	version     string // shown in the startup banner; see renderBanner
 
 	// Initial query — auto-submitted once when ready
 	initialQuery     string
@@ -316,6 +318,7 @@ func NewModel(cfg Config) Model {
 		eventBus:          cfg.EventBus,
 		agentName:         cfg.AgentName,
 		modelName:         cfg.ModelName,
+		version:           cfg.Version,
 		initialQuery:      cfg.InitialQuery,
 		renderer:          r,
 		userInputReqCh:    cfg.UserInputReqCh,
@@ -1713,8 +1716,17 @@ func (m *Model) updateViewport() {
 	// final content. count = number of newlines in the block's rendered
 	// output; that is exactly how many viewport lines it occupies.
 	var sb strings.Builder
-	m.spans = m.spans[:0]
 	line := 0
+	// The startup banner is raw lipgloss (fixed box layout), not markdown —
+	// it's prepended directly rather than going through renderBlock/glamour,
+	// which would word-wrap and reflow its border box. It isn't a block, so
+	// it gets no span entry; line starts after it so click hit-testing
+	// (blockAt) still maps content lines to the right block.
+	if banner := renderBanner(m.width, m.version, m.agentName, m.modelName); banner != "" {
+		sb.WriteString(banner)
+		line = strings.Count(banner, "\n")
+	}
+	m.spans = m.spans[:0]
 	for i := range m.blocks {
 		rendered := m.renderBlock(i)
 		n := strings.Count(rendered, "\n")

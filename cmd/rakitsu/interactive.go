@@ -291,6 +291,7 @@ func runInteractive(ctx context.Context, cfg *config.Config, initialQuery string
 		EventBus:          eventBus,
 		AgentName:         agentName,
 		ModelName:         modelName,
+		Version:           versionString(),
 		InitialQuery:      initialQuery,
 		UserInputReqCh:    userInputReqCh,
 		UserInputRespCh:   userInputRespCh,
