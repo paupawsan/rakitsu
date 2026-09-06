@@ -292,6 +292,16 @@ func runQuickstart(cmd *cobra.Command, args []string) error {
 		fmt.Println("  Open http://localhost:9100 in your browser")
 		fmt.Println()
 
+		// serve's ConfigStore only scans ".", "./examples", "./configs"
+		// relative to the process's working directory, and generated
+		// configs use allowed_paths like "./" (resolved against cwd too).
+		// Without this chdir, serve keeps running from wherever quickstart
+		// was invoked, so the project just created in absDir is invisible
+		// in the web UI's config list.
+		if err := os.Chdir(absDir); err != nil {
+			return fmt.Errorf("cannot switch to project directory: %w", err)
+		}
+
 		// Try to open browser
 		go openBrowser("http://localhost:9100")
 
