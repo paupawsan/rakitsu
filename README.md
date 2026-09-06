@@ -37,6 +37,12 @@ rakitsu serve
 
 Open **http://localhost:9100** — drag agents onto the canvas, wire up tools, hit Run.
 
+> **macOS:** release binaries aren't notarized yet, so Gatekeeper can silently
+> kill a freshly downloaded `rakitsu` on first run (no dialog, just "killed").
+> If that happens: `xattr -cr $(command -v rakitsu)`, and if it's still
+> killed, `sudo spctl --add $(command -v rakitsu)` or System Settings →
+> Privacy & Security → **Open Anyway**.
+
 ## Why Rakitsu?
 
 - **Visual-first**: Design agents on a drag-and-drop canvas, not in code
