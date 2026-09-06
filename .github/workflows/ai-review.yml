@@ -120,9 +120,16 @@ jobs:
       # only, never checked into the working tree, never executed. GitHub
       # maintains refs/pull/<N>/head for every open PR, fork-authored ones
       # included, so this works the same regardless of where the PR is from.
+      # Authenticates this one command directly (repo is private) rather
+      # than via `persist-credentials: true` on checkout, which would
+      # leave the token sitting in .git/config for the rest of the job —
+      # $GH_TOKEN is a real env var read by the shell, not `${{ }}`
+      # interpolated into the script source.
       - name: Fetch PR head for diffing (never executed)
         if: steps.resolve.outputs.skip != 'true'
-        run: git fetch --no-tags origin "pull/${{ steps.resolve.outputs.number }}/head"
+        run: |
+          git fetch --no-tags "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" \
+            "pull/${{ steps.resolve.outputs.number }}/head"
 
       # Runs after checkout+fetch (not before) so it can check whether the
       # pre-push commit is actually reachable: a force-push/rebase/amend on
