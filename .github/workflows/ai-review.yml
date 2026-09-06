@@ -1,0 +1,201 @@
+# SECURITY INVARIANTS — read before editing this file.
+#
+# 1. Script injection: no field that can contain attacker-chosen free text
+#    (comment body, PR title/body, commit messages) is ever interpolated
+#    with ${{ }} directly into a `run:` shell block below. That's the
+#    classic GitHub Actions script-injection bug — a value substituted
+#    into script text before bash even runs it, letting a crafted string
+#    break out and execute arbitrary commands in a job that has
+#    OPENAI_API_KEY in its environment. Every ${{ }} used inside a `run:`
+#    block here is either a fixed enum GitHub sets itself (event_name,
+#    event.action), an integer (a PR/issue number), a git SHA, this
+#    repo's own name, or a `steps.*.outputs.*` value this workflow
+#    computed itself server-side — never raw user text. `github.event.
+#    comment.body` appears ONLY inside the job-level `if:` via
+#    `startsWith(...)`, which GitHub evaluates as an expression, not as
+#    shell text — that usage is safe. If you ever need to reference
+#    comment/PR-title/body text from a `run:` step, pass it through
+#    `env:` (a real env var, not string substitution) and read it from
+#    `$THE_VAR` in the script — never `${{ }}` it directly into the
+#    script source.
+#
+# 2. "Pwn requests": the scripts this job actually EXECUTES
+#    (scripts/ci-review.sh, scripts/parse-findings.py,
+#    scripts/post-review.py, scripts/review-config-openai.yaml) are
+#    ALWAYS checked out from this repo's own default branch — see the
+#    `ref:` expression on the checkout step below — never from the PR's
+#    own head, even though `issue_comment` and `workflow_dispatch` events
+#    run with full secrets and a write-scoped token regardless of who
+#    opened the PR (unlike `pull_request` events, which GitHub restricts
+#    for forks). Without this, a `/review` comment from a trusted
+#    maintainer on a hostile fork PR — the exact case that trigger exists
+#    for — would execute that fork's own scripts with OPENAI_API_KEY and
+#    write access to this repo. The PR's actual head commit is fetched
+#    separately (see "Fetch PR head for diffing") purely so `git diff`
+#    can read its tree content as text — it is never checked into the
+#    working tree that also holds the scripts above, and nothing in this
+#    job ever executes anything from it.
+name: AI PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to review'
+        required: true
+        type: number
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: >
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.fork == false &&
+       contains(fromJSON('["OWNER","COLLABORATOR","MEMBER"]'), github.event.pull_request.author_association)) ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       startsWith(github.event.comment.body, '/review') &&
+       contains(fromJSON('["OWNER","COLLABORATOR","MEMBER"]'), github.event.comment.author_association)) ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # A fork PR triggered via `pull_request` is excluded by the job-level
+      # `if:` above (GitHub withholds secrets from those anyway — this just
+      # turns a guaranteed failure into a clean skip). A closed/merged PR
+      # can still reach this step via `/review` or workflow_dispatch, so it
+      # gets its own graceful skip here rather than a red X.
+      - name: Resolve PR
+        id: resolve
+        env:
+          # workflow_dispatch's `type: number` is a UI hint only — the
+          # dispatch REST API doesn't enforce it — so this is the one
+          # value in this file whose integer-ness isn't otherwise
+          # guaranteed. Routed through env: (a real variable) rather than
+          # `${{ }}`-interpolated directly into the script, so the
+          # digit-only check below validates the actual value the shell
+          # sees instead of validating after an unsafe substitution
+          # already happened.
+          PR_NUMBER_INPUT: ${{ inputs.pr_number }}
+        run: |
+          case "${{ github.event_name }}" in
+            pull_request) NUM="${{ github.event.pull_request.number }}" ;;
+            issue_comment) NUM="${{ github.event.issue.number }}" ;;
+            workflow_dispatch) NUM="$PR_NUMBER_INPUT" ;;
+          esac
+          case "$NUM" in
+            ''|*[!0-9]*) echo "FATAL: bad PR number: $NUM" >&2; exit 1 ;;
+          esac
+          gh pr view "$NUM" --repo "${{ github.repository }}" \
+            --json number,state,headRefOid,baseRefOid > pr.json
+          if [ "$(jq -r .state < pr.json)" != "OPEN" ]; then
+            echo "PR #$NUM is not open — nothing to review, skipping." >&2
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "number=$NUM" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$(jq -r .headRefOid < pr.json)" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$(jq -r .baseRefOid < pr.json)" >> "$GITHUB_OUTPUT"
+
+      # Always this repo's own default branch for pull_request/issue_comment
+      # (never the PR's own content — see SECURITY INVARIANT 2 above). For
+      # workflow_dispatch, `github.ref` is whatever ref the run was manually
+      # dispatched against — dispatching already requires repo write access,
+      # so trusting the chosen ref here is no wider than that access already
+      # grants, and it's what lets a maintainer test a not-yet-merged change
+      # to this very workflow/its scripts.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        if: steps.resolve.outputs.skip != 'true'
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Brings the PR's actual head commit into the local object database
+      # so `git diff` can read its tree as text — this is diff material
+      # only, never checked into the working tree, never executed. GitHub
+      # maintains refs/pull/<N>/head for every open PR, fork-authored ones
+      # included, so this works the same regardless of where the PR is from.
+      # Authenticates this one command directly (repo is private) rather
+      # than via `persist-credentials: true` on checkout, which would
+      # leave the token sitting in .git/config for the rest of the job.
+      # Uses `-c http.<url>.extraheader` (an ephemeral, this-command-only
+      # git config override, never written to any file) rather than
+      # embedding the token in the fetch URL itself — the same mechanism
+      # actions/checkout uses internally — so the token never appears in
+      # a URL a later error message could echo back. $GH_TOKEN is a real
+      # env var read by the shell, not `${{ }}` interpolated into the
+      # script source.
+      - name: Fetch PR head for diffing (never executed)
+        if: steps.resolve.outputs.skip != 'true'
+        run: |
+          AUTH=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$AUTH"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH" \
+            fetch --no-tags origin "pull/${{ steps.resolve.outputs.number }}/head"
+
+      # Runs after checkout+fetch (not before) so it can check whether the
+      # pre-push commit is actually reachable: a force-push/rebase/amend on
+      # the PR branch leaves `before` unreachable from the new head, and
+      # GitHub doesn't keep it fetchable in that case. Falls back to a full
+      # diff instead of failing the whole job on that commit.
+      - name: Determine diff mode
+        id: mode
+        if: steps.resolve.outputs.skip != 'true'
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ github.event.action }}" = "synchronize" ] \
+             && git cat-file -e "${{ github.event.before }}^{commit}" 2>/dev/null; then
+            echo "mode=incremental" >> "$GITHUB_OUTPUT"
+            echo "base=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+            echo "head=${{ github.event.after }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+            echo "base=${{ steps.resolve.outputs.base_sha }}" >> "$GITHUB_OUTPUT"
+            echo "head=${{ steps.resolve.outputs.head_sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install latest rakitsu release
+        if: steps.resolve.outputs.skip != 'true'
+        run: |
+          TAG=$(gh release list --repo "${{ github.repository }}" --limit 1 --json tagName -q '.[0].tagName')
+          if [ -z "$TAG" ]; then
+            echo "FATAL: no release found on ${{ github.repository }} (rebuild in progress? nothing tagged yet?) — nothing to install." >&2
+            exit 1
+          fi
+          gh release download "$TAG" --repo "${{ github.repository }}" \
+            --pattern 'rakitsu-linux-amd64' --pattern 'checksums.txt' --clobber
+          grep linux-amd64 checksums.txt | shasum -a 256 -c -
+          sudo install -m 755 rakitsu-linux-amd64 /usr/local/bin/rakitsu
+
+      - name: Run review
+        if: steps.resolve.outputs.skip != 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          scripts/ci-review.sh \
+            "${{ steps.mode.outputs.mode }}" \
+            "${{ steps.mode.outputs.base }}" \
+            "${{ steps.mode.outputs.head }}" \
+            review-result.json
+
+      - name: Post review
+        if: steps.resolve.outputs.skip != 'true'
+        run: |
+          python3 scripts/post-review.py review-result.json \
+            "${{ github.repository }}" \
+            "${{ steps.resolve.outputs.number }}" \
+            "${{ steps.resolve.outputs.head_sha }}"

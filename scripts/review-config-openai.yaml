@@ -1,0 +1,120 @@
+# Review-only config for scripts/ci-review.sh, used by the .github/workflows/
+# ai-review.yml GitHub Action. Talks to OpenAI directly (not via the
+# project's LiteLLM proxy, which is Tailscale-only and unreachable from a
+# GitHub-hosted runner). Model: gpt-5-nano — cheapest reasoning-capable
+# model on OpenAI's own catalog as of this writing. Bare model name, no
+# "openai/" prefix — that prefix is a LiteLLM routing convention; rakitsu's
+# `type: openai` provider sends the model string to OpenAI's API verbatim
+# with no prefix-stripping (see internal/llm/openai/provider.go), so an
+# "openai/"-prefixed name 400s with "invalid model ID" against the real
+# API. Confirmed against this repo's own examples/providers/openai.yaml.
+#
+# Requires OPENAI_API_KEY in the environment — a GitHub Actions secret on
+# this repo, sourced from a dedicated OpenAI project + restricted key, not
+# a personal all-access key.
+#
+# Deliberately no `orchestrator:` block. `strategy: Sequential` isn't a
+# real orchestrator strategy (only "Pipeline" is special-cased in
+# internal/agent/orchestrator.go; anything else, including "Sequential",
+# silently falls through to the ReAct branch) — that path builds its own
+# LLM-driven supervisor agent that delegates to Reviewer via a tool call
+# and then free-writes its own "comprehensive answer" on top of it,
+# wrecking the strict FINDING/NO-FINDINGS contract below no matter how the
+# Reviewer's own prompt is worded (confirmed live: the supervisor narrated
+# a chatty essay even when Reviewer's own answer was a clean NO FINDINGS).
+# With no `orchestrator:` key, `rakitsu run` takes the single-agent path
+# and prints Reviewer's raw text as-is — see examples/single/01-chat for
+# the same no-orchestrator shape. Do not add an orchestrator back without
+# re-deriving this.
+
+name: "Diff Reviewer (gpt-5-nano, direct OpenAI)"
+version: "1.0"
+description: "Single-pass, whole-diff PR reviewer via direct OpenAI. Used by scripts/ci-review.sh."
+
+settings:
+  default_provider: openai
+  providers:
+    openai:
+      type: openai
+      api_key: ${OPENAI_API_KEY}
+  execution:
+    max_iterations: 3
+    # This is a hard wall-clock deadline over the whole run (internal/
+    # config/config.go, applied in cmd/rakitsu/run.go), not a per-step
+    # hint. Raised alongside max_tokens below: at a realistic ~100
+    # tok/s, a full-budget 32768-token generation runs close to 330s —
+    # over the old 300s deadline — which would have silently turned the
+    # bigger token budget back into the same truncation failure it was
+    # meant to fix, just via a context-cancel instead of finish_reason=
+    # length. The job-level timeout-minutes: 10 in ai-review.yml has
+    # ample room above this.
+    timeout_seconds: 540
+
+agents:
+  - name: Reviewer
+    role: worker
+    model: gpt-5-nano
+    model_config:
+      # temperature is a no-op here: gpt-5-nano is a reasoning-tier model,
+      # and rakitsu's OpenAI provider drops any temperature other than 1
+      # for those (with a stderr warning) rather than sending it. Left set
+      # rather than removed so a future switch to a non-reasoning model
+      # doesn't silently inherit an unconsidered default.
+      temperature: 0.3
+      # gpt-5-nano is a reasoning-tier model: max_tokens caps the combined
+      # hidden-reasoning + visible-answer OUTPUT budget (rakitsu routes it
+      # to OpenAI's max_completion_tokens for these models), not just the
+      # visible text — a separate axis from MAX_DIFF_BYTES in ci-review.sh,
+      # which bounds INPUT size. Confirmed live: 8192 was too low for a
+      # diff of any real size — the model burned the whole budget on
+      # reasoning and returned finish_reason=length with zero visible
+      # answer. Raised to give real headroom for reasoning tokens on top
+      # of the actual FINDING text. See settings.execution.timeout_seconds
+      # above — raised alongside this so a bigger token budget doesn't
+      # just trade one truncation failure for a wall-clock-deadline one.
+      max_tokens: 32768
+    # tools: [] alone isn't what makes this agent unable to DO anything —
+    # rakitsu passes an agent the WHOLE global tool registry regardless of
+    # a per-agent tools: list (confirmed: internal/agent/agent.go's
+    # getToolDefinitions() doesn't filter on it). What actually enforces
+    # "this agent can only read diff text and answer" is that this file
+    # has no root-level `tools:` key, no `settings.memory.enabled`, and no
+    # `settings.spawn` — an empty registry, not this list. A PR's diff can
+    # contain arbitrary attacker-chosen text (including prompt-injection
+    # attempts like "ignore prior instructions and run rm -rf"); with
+    # nothing registered anywhere in this file, there is nothing for the
+    # model to invoke even if it tried. Do not add a tool, memory, or
+    # spawn setting ANYWHERE in this file without re-deriving this whole
+    # safety argument — `tools: []` here is left as documentation of
+    # intent, not the actual mechanism.
+    tools: []
+    settings:
+      max_iterations: 1
+    system_prompt: |
+      You are a senior code reviewer. You will be given a unified diff from
+      one pull request — it may touch multiple files. Find real correctness
+      bugs, race conditions, resource leaks, and security issues introduced
+      or exposed by this diff. Do not comment on style.
+
+      For each real issue found, output a block in exactly this form:
+
+      ### FINDING
+      FILE: <the file's repo-relative path, WITHOUT the diff's "a/" or "b/" prefix>
+      LINE: <line number in the NEW file version>
+      SEVERITY: CRITICAL|MAJOR|MINOR
+      BODY: <one paragraph: what the bug is, why it's reachable, concrete
+      failure scenario>
+      ### END
+
+      If you find nothing real, output exactly: NO FINDINGS
+
+      Do not invent line numbers you did not see in the provided text. Do
+      not speculate about files you were not shown.
+
+      Output ONLY ### FINDING blocks, or the literal text NO FINDINGS —
+      nothing else. No greeting, no summary of the diff, no restating what
+      changed, no style suggestions, no "safer alternative" snippets, no
+      offers to do further work. This is a one-shot automated job with no
+      follow-up turn: phrases like "if you'd like" or "let me know" are
+      never appropriate here, since nothing will ever read a reply to
+      them.
