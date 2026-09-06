@@ -28,6 +28,27 @@ type Provider struct {
 	formatResolver      string                // "registry" | "sniffing"
 }
 
+// warnFn receives operator-facing diagnostics this package needs to surface
+// without going through the normal error return path (see omitRejectedParam).
+// Defaults to os.Stderr, matching every non-interactive caller (rakitsu run,
+// serve, chathost). A caller whose terminal is owned by an alt-screen
+// renderer — the interactive chat TUI — MUST redirect this via
+// SetWarnWriter before making any provider call: a raw write to the
+// terminal here races bubbletea's own concurrent render writes and
+// corrupts the screen. Making the write atomic doesn't help (unlike
+// internal/chat/clipboard.go's OSC 52 write, which is invisible and
+// non-positional) because this text is visible and cursor-moving, so even
+// one atomic Write() still lands at an arbitrary point relative to
+// bubbletea's own writes and desyncs its row bookkeeping from the
+// terminal's real cursor position.
+var warnFn = func(s string) { fmt.Fprint(os.Stderr, s) }
+
+// SetWarnWriter overrides where this package's operator-facing diagnostics
+// go. Process-wide: a rakitsu process is either interactive or headless for
+// its entire lifetime, never both, so there's no ordering hazard in setting
+// this once at startup before any provider is constructed.
+func SetWarnWriter(fn func(string)) { warnFn = fn }
+
 // headerTransport injects custom HTTP headers into every request.
 type headerTransport struct {
 	base    http.RoundTripper
@@ -141,20 +162,20 @@ func omitRejectedParam(req *openai.ChatCompletionRequest, wrapped error) bool {
 		if req.Temperature == 0 {
 			return false
 		}
-		fmt.Fprintf(os.Stderr, "Warning: model %q rejected temperature=%v — retrying without it. "+
+		warnFn(fmt.Sprintf("Warning: model %q rejected temperature=%v — retrying without it. "+
 			"That usually means it's a reasoning-tier model, which only accepts the default (temperature: 1). "+
 			"Set model_config.temperature: 1 on this agent (or drop temperature entirely) to stop relying on this retry.\n",
-			req.Model, req.Temperature)
+			req.Model, req.Temperature))
 		req.Temperature = 0
 		return true
 	case "top_p":
 		if req.TopP == 0 {
 			return false
 		}
-		fmt.Fprintf(os.Stderr, "Warning: model %q rejected top_p=%v — retrying without it. "+
+		warnFn(fmt.Sprintf("Warning: model %q rejected top_p=%v — retrying without it. "+
 			"That usually means it's a reasoning-tier model, which only accepts the default (top_p: 1). "+
 			"Set model_config.top_p: 1 on this agent (or drop top_p entirely) to stop relying on this retry.\n",
-			req.Model, req.TopP)
+			req.Model, req.TopP))
 		req.TopP = 0
 		return true
 	default:

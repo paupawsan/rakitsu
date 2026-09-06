@@ -601,6 +601,49 @@ func TestAgentUsage_RootAgentTrackedThroughUpdate(t *testing.T) {
 	}
 }
 
+// TestCtrlOL_ScrollViewport is a regression for two reported-broken scroll
+// keybindings in a row: plain PgUp/PgDown isn't a real key on most Mac
+// keyboards without Fn (some terminals don't even forward Fn+Up/Fn+Down as
+// PgUp/PgDown at all), and the Alt+Up/Alt+Down that replaced it turned out
+// not to reach the app as Alt-modified keys on a real Mac terminal either —
+// confirmed live with `cat -v`. Ctrl+O/Ctrl+L (plain control bytes, not an
+// escape sequence a terminal has to choose to send) replaced that — verify
+// the viewport actually scrolls, and that plain Up still falls through to
+// the existing history-recall path unchanged.
+func TestCtrlOL_ScrollViewport(t *testing.T) {
+	m := readyModel(t)
+	m.blocks = []ContentBlock{{Type: BlockUser, Text: "first"}}
+	for i := 0; i < 40; i++ {
+		m.blocks = append(m.blocks, ContentBlock{Type: BlockSystem, Text: fmt.Sprintf("line %d", i)})
+	}
+	m.updateViewport()
+	m.viewport.GotoBottom()
+	atBottom := m.viewport.YOffset
+
+	updated, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlO})
+	m2 := updated.(Model)
+	if m2.viewport.YOffset >= atBottom {
+		t.Errorf("Ctrl+O should scroll the viewport up, YOffset stayed at %d", m2.viewport.YOffset)
+	}
+	if m2.historyIdx != -1 {
+		t.Errorf("Ctrl+O must not trigger input-history recall, historyIdx = %d", m2.historyIdx)
+	}
+
+	updated, _ = m2.handleKey(tea.KeyMsg{Type: tea.KeyCtrlL})
+	m3 := updated.(Model)
+	if m3.viewport.YOffset <= m2.viewport.YOffset {
+		t.Errorf("Ctrl+L should scroll the viewport back down, got YOffset=%d (was %d)", m3.viewport.YOffset, m2.viewport.YOffset)
+	}
+
+	// Plain Up (no Ctrl) is untouched — still recalls input history, since
+	// there's nothing typed yet at the top line of an empty input.
+	updated, _ = m3.handleKey(tea.KeyMsg{Type: tea.KeyUp})
+	m4 := updated.(Model)
+	if m4.viewport.YOffset != m3.viewport.YOffset {
+		t.Errorf("plain Up must not move the viewport, YOffset changed from %d to %d", m3.viewport.YOffset, m4.viewport.YOffset)
+	}
+}
+
 func TestCtrlU_OpensUsagePopup(t *testing.T) {
 	m := Model{width: 80, height: 24, ready: true, spinner: spinner.New(), agentUsage: map[string]*agentUsageSnapshot{}}
 	updated, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlU})

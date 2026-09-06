@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -13,12 +14,36 @@ import (
 	"github.com/paupawsan/rakitsu/internal/chat"
 	"github.com/paupawsan/rakitsu/internal/config"
 	"github.com/paupawsan/rakitsu/internal/llm"
+	"github.com/paupawsan/rakitsu/internal/llm/openai"
 	"github.com/paupawsan/rakitsu/internal/memory"
 	"github.com/paupawsan/rakitsu/internal/store"
 	"github.com/paupawsan/rakitsu/internal/telemetry"
 	"github.com/paupawsan/rakitsu/internal/tools/userinput"
 	"gopkg.in/yaml.v3"
 )
+
+// logProviderWarning appends an operator-facing provider diagnostic to
+// ~/.rakitsu/provider-warnings.log instead of the terminal — see
+// runInteractive's openai.SetWarnWriter call for why. Best-effort: a home
+// directory or filesystem problem here just drops the diagnostic, the same
+// way the original os.Stderr write would have been lost if stderr were
+// redirected to /dev/null.
+func logProviderWarning(s string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	dir := filepath.Join(home, ".rakitsu")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "provider-warnings.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s %s", time.Now().Format(time.RFC3339), s)
+}
 
 // sendDrainTimeout bounds how long exit waits for a cancelled directed agent
 // chat to unwind before tearing down its tools anyway. A send that honours
@@ -62,6 +87,15 @@ func runInteractive(ctx context.Context, cfg *config.Config, initialQuery string
 	if len(cfg.Agents) == 0 {
 		return fmt.Errorf("no agents defined in config")
 	}
+
+	// This command owns the terminal via bubbletea's alt-screen renderer
+	// (see the tea.NewProgram call below). A provider-level diagnostic
+	// (e.g. a reasoning-tier model rejecting a non-default temperature)
+	// must never write to the terminal directly — that races bubbletea's
+	// own concurrent render writes and corrupts the screen, no matter how
+	// atomic the write itself is (see internal/llm/openai's warnFn doc).
+	// Redirect it to a log file before any provider is built below.
+	openai.SetWarnWriter(logProviderWarning)
 
 	eventBus := telemetry.NewEventBus(1024)
 
@@ -305,7 +339,17 @@ func runInteractive(ctx context.Context, cfg *config.Config, initialQuery string
 		PostMessageResult: postMessageResult,
 	})
 
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	// No mouse ProgramOption: the terminal keeps mouse input, so native
+	// click-drag-select and Cmd+C / Ctrl+Shift+C copy work like any other
+	// terminal program. handleMouse/handleClick in internal/chat/model.go
+	// are unreachable as a result (bubbletea never emits tea.MouseMsg
+	// without one) — kept for ROADMAP M2.5 phase 2 ("Mouse interaction"),
+	// not dead code to delete. Ctrl+O/Ctrl+L replace the mouse-wheel scroll
+	// this gives up — plain control bytes, not escape sequences, after
+	// PgUp/PgDown (no real key on most Mac keyboards without Fn) and
+	// Alt+Up/Alt+Down (didn't reach the app as Alt-modified keys on a real
+	// Mac terminal either) both turned out to be terminal-dependent.
+	p := tea.NewProgram(model, tea.WithAltScreen())
 	finalModel, err := p.Run()
 	// Stop the background event bridge — see chat.Model.Close's doc comment
 	// for why this can't be left to the goroutine to notice on its own.

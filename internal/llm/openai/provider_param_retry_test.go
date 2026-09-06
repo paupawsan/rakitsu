@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/paupawsan/rakitsu/internal/llm"
@@ -137,6 +138,34 @@ func TestGenerate_UnrelatedBadRequestIsNotRetried(t *testing.T) {
 	}
 	if len(*requests) != 1 {
 		t.Fatalf("expected exactly 1 request (no retry for an unrelated param), got %d", len(*requests))
+	}
+}
+
+// TestGenerate_ParamRejectionWarningUsesWarnFn is a regression for the chat
+// TUI screen-corruption bug: omitRejectedParam used to write its warning
+// straight to os.Stderr, which races bubbletea's own concurrent renderer
+// and corrupts the alt-screen (see internal/chat's interactive command).
+// The warning must go through the package's swappable warnFn sink instead,
+// so an alt-screen caller can redirect it away from the terminal.
+func TestGenerate_ParamRejectionWarningUsesWarnFn(t *testing.T) {
+	srv, _ := paramRejectingServer(t, "temperature", 1)
+	defer srv.Close()
+
+	var got []string
+	orig := warnFn
+	warnFn = func(s string) { got = append(got, s) }
+	t.Cleanup(func() { warnFn = orig })
+
+	p := NewProvider(&llm.ProviderConfig{APIKey: "test-key", BaseURL: srv.URL, Model: "openai/gpt-5.6-luna", Temperature: 0.3})
+	if _, err := p.Generate(context.Background(), "", []llm.Message{llm.NewTextMessage("user", "hi")}, nil); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 warning through warnFn, got %d: %v", len(got), got)
+	}
+	if !strings.Contains(got[0], `model "openai/gpt-5.6-luna" rejected temperature`) {
+		t.Errorf("warning text = %q, want it to name the model and rejected param", got[0])
 	}
 }
 

@@ -3,6 +3,10 @@ package chat
 import (
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // TestClampToHeight_Shorter pads output when it has fewer lines than the
@@ -64,4 +68,54 @@ func TestClampToHeight_Empty(t *testing.T) {
 	if got != 4 {
 		t.Errorf("empty input clamped to height=4 should produce 4 lines, got %d: %q", got, out)
 	}
+}
+
+// assertViewFitsWidth is shared by TestView_LongModelNameFitsWidth and
+// TestView_LongNoticeFitsWidth: every rendered line must fit m.width (a
+// line the terminal has to wrap counts as 1 line to clampToHeight but 2
+// rows on screen, desyncing bubbletea's alt-screen redraw), and the total
+// line count must still be exactly m.height.
+func assertViewFitsWidth(t *testing.T, m Model) {
+	t.Helper()
+	out := m.View()
+	lines := strings.Split(out, "\n")
+	if len(lines) != m.height {
+		t.Fatalf("View() produced %d lines, want exactly %d", len(lines), m.height)
+	}
+	for i, l := range lines {
+		if w := lipgloss.Width(l); w > m.width {
+			t.Errorf("line %d width = %d, want <= %d (m.width): %q", i, w, m.width, l)
+		}
+	}
+}
+
+// TestView_LongModelNameFitsWidth is a regression for the chat TUI screen
+// corruption: the title bar (agentName + modelName) had no width clamp,
+// unlike the sticky header and input-row prefix. A realistic long LiteLLM
+// model alias overflowed it (86 cols rendered in an 80-col terminal).
+func TestView_LongModelNameFitsWidth(t *testing.T) {
+	m := Model{width: 80, height: 24, historyIdx: -1, spinner: spinner.New()}
+	m.textarea = textarea.New()
+	m = m.handleResize()
+	m.agentName = "TechLead"
+	m.modelName = "vllm-nemotron-elastic-30b-long-context-window-experimental"
+	m.blocks = []ContentBlock{{Type: BlockUser, Text: "hi"}}
+	m.updateViewport()
+
+	assertViewFitsWidth(t, m)
+}
+
+// TestView_LongNoticeFitsWidth is a regression for the same class of bug in
+// statusBar(): a long notice (e.g. after a copy) plus a large token count
+// could push the status line past m.width with no truncation.
+func TestView_LongNoticeFitsWidth(t *testing.T) {
+	m := Model{width: 55, height: 24, historyIdx: -1, spinner: spinner.New()}
+	m.textarea = textarea.New()
+	m = m.handleResize()
+	m.totalTokens = 123456789
+	m.notice = "copied reply 3/12 to clipboard"
+	m.blocks = []ContentBlock{{Type: BlockUser, Text: "hi"}}
+	m.updateViewport()
+
+	assertViewFitsWidth(t, m)
 }
