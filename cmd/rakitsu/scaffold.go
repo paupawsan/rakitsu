@@ -48,7 +48,7 @@ func init() {
 	rootCmd.AddCommand(scaffoldCmd)
 
 	scaffoldCmd.Flags().StringVarP(&scaffoldOutput, "output", "o", "", "Output file or directory path (default: <use-case>.yaml or ./<use-case>/)")
-	scaffoldCmd.Flags().StringVarP(&scaffoldProvider, "provider", "p", "openai", "LLM provider: openai, anthropic, gemini, ollama")
+	scaffoldCmd.Flags().StringVarP(&scaffoldProvider, "provider", "p", "openai", "LLM provider: openai, anthropic, gemini, ollama, litellm")
 	scaffoldCmd.Flags().StringVarP(&scaffoldModel, "model", "m", "", "Model name (default: provider's recommended model)")
 	scaffoldCmd.Flags().BoolVar(&scaffoldDir, "dir", false, "Scaffold as modular directory instead of single YAML")
 	scaffoldCmd.Flags().BoolVarP(&scaffoldList, "list", "l", false, "List all available use-cases")
@@ -81,13 +81,15 @@ func runScaffold(cmd *cobra.Command, args []string) error {
 		model = scaffold.DefaultModel(scaffoldProvider)
 	}
 
-	// Resolve API key env var
+	// Resolve API key / base URL env vars
 	apiKeyEnv := scaffold.APIKeyEnvVar(scaffoldProvider)
+	baseURLEnv := scaffold.BaseURLEnvVar(scaffoldProvider)
 
 	data := scaffold.TemplateData{
-		Provider:  scaffoldProvider,
-		Model:     model,
-		APIKeyEnv: apiKeyEnv,
+		Provider:   scaffoldProvider,
+		Model:      model,
+		APIKeyEnv:  apiKeyEnv,
+		BaseURLEnv: baseURLEnv,
 	}
 
 	// Render templates

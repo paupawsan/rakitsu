@@ -39,6 +39,29 @@ func TestRender_RejectsNewlineInModel(t *testing.T) {
 	}
 }
 
+func TestRender_RejectsNewlineInBaseURLEnv(t *testing.T) {
+	// BaseURLEnv is spliced into the identical quoted-scalar YAML context
+	// (base_url: "${...}") as APIKeyEnv — it needs the same guard.
+	data := TemplateData{Provider: "litellm", Model: "your-model-alias", APIKeyEnv: "LITELLM_API_KEY", BaseURLEnv: "LITELLM_BASE_URL\"\n  evil: true"}
+	if _, err := Render(Presets["llm-chat"], data, false); err == nil {
+		t.Fatal("expected an error for a BaseURLEnv value containing a newline")
+	}
+}
+
+func TestRender_RejectsQuoteInBaseURLEnv(t *testing.T) {
+	data := TemplateData{Provider: "litellm", Model: "your-model-alias", APIKeyEnv: "LITELLM_API_KEY", BaseURLEnv: `LITELLM_BASE_URL"}, evil: true, x: {"`}
+	if _, err := Render(Presets["llm-chat"], data, false); err == nil {
+		t.Fatal("expected an error for a BaseURLEnv value containing a double-quote")
+	}
+}
+
+func TestRender_RejectsBackslashInBaseURLEnv(t *testing.T) {
+	data := TemplateData{Provider: "litellm", Model: "your-model-alias", APIKeyEnv: "LITELLM_API_KEY", BaseURLEnv: `LITELLM_BASE_URL\q`}
+	if _, err := Render(Presets["llm-chat"], data, false); err == nil {
+		t.Fatal("expected an error for a BaseURLEnv value containing a backslash")
+	}
+}
+
 func TestRender_RejectsNewlineInAPIKeyEnv(t *testing.T) {
 	// APIKeyEnv is spliced into the identical quoted-scalar YAML context
 	// (api_key: "${...}") as Provider/Model — it needs the same guard.
@@ -163,6 +186,15 @@ func TestDefaultModel_KnownProviders(t *testing.T) {
 	}
 }
 
+// Regression: litellm previously had no ProviderDefaults entry, so
+// DefaultModel("litellm") fell through to the generic "gpt-4o-mini" — a
+// real OpenAI model name meaningless on an arbitrary user's LiteLLM proxy.
+func TestDefaultModel_LiteLLM(t *testing.T) {
+	if got := DefaultModel("litellm"); got != "your-model-alias" {
+		t.Errorf("DefaultModel(litellm) = %q, want %q", got, "your-model-alias")
+	}
+}
+
 func TestDefaultModel_UnknownProvider_Fallback(t *testing.T) {
 	if got := DefaultModel("unknown-llm"); got != "gpt-4o-mini" {
 		t.Errorf("DefaultModel(unknown) = %q, want %q", got, "gpt-4o-mini")
@@ -175,10 +207,35 @@ func TestAPIKeyEnvVar(t *testing.T) {
 		"anthropic": "ANTHROPIC_API_KEY",
 		"gemini":    "GEMINI_API_KEY",
 		"ollama":    "",
+		"litellm":   "LITELLM_API_KEY",
 	}
 	for provider, want := range cases {
 		if got := APIKeyEnvVar(provider); got != want {
 			t.Errorf("APIKeyEnvVar(%q) = %q, want %q", provider, got, want)
+		}
+	}
+}
+
+// Regression: litellm previously had no case in APIKeyEnvVar's switch, so it
+// silently fell through to the "openai" default — a scaffolded litellm
+// config referenced ${OPENAI_API_KEY} instead of ${LITELLM_API_KEY}.
+func TestAPIKeyEnvVar_LiteLLMNotOpenAIDefault(t *testing.T) {
+	if got := APIKeyEnvVar("litellm"); got == "OPENAI_API_KEY" {
+		t.Error("APIKeyEnvVar(litellm) fell through to the OPENAI_API_KEY default")
+	}
+}
+
+func TestBaseURLEnvVar(t *testing.T) {
+	cases := map[string]string{
+		"openai":    "",
+		"anthropic": "",
+		"gemini":    "",
+		"ollama":    "", // defaulted to localhost:11434 at runtime, not scaffolded
+		"litellm":   "LITELLM_BASE_URL",
+	}
+	for provider, want := range cases {
+		if got := BaseURLEnvVar(provider); got != want {
+			t.Errorf("BaseURLEnvVar(%q) = %q, want %q", provider, got, want)
 		}
 	}
 }
@@ -208,6 +265,45 @@ func TestRender_InterpolatesProvider(t *testing.T) {
 		// Must not contain un-rendered template markers
 		if strings.Contains(content, "{{.") {
 			t.Errorf("rendered content still contains template markers:\n%s", content)
+		}
+	}
+}
+
+// Regression: a scaffolded litellm config must reference LITELLM_BASE_URL
+// (there is no runtime default for it, unlike ollama's localhost fallback)
+// — without it, rakitsu's OpenAI-compatible client falls back to
+// https://api.openai.com and sends the proxy key to the wrong host.
+func TestRender_LiteLLM_IncludesBaseURL(t *testing.T) {
+	data := TemplateData{Provider: "litellm", Model: "your-model-alias", APIKeyEnv: "LITELLM_API_KEY", BaseURLEnv: "LITELLM_BASE_URL"}
+	for _, dir := range []bool{false, true} {
+		files, err := Render(Presets["llm-chat"], data, dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for name, content := range files {
+			if !strings.HasSuffix(name, ".yaml") {
+				continue
+			}
+			if !strings.Contains(content, `base_url: "${LITELLM_BASE_URL}"`) {
+				t.Errorf("dir=%v: rendered %s missing base_url line:\n%s", dir, name, content)
+			}
+			if !strings.Contains(content, `api_key: "${LITELLM_API_KEY}"`) {
+				t.Errorf("dir=%v: rendered %s missing correct api_key line:\n%s", dir, name, content)
+			}
+		}
+	}
+}
+
+// A provider with no BaseURLEnv (e.g. openai) must not get a stray
+// base_url line — mirrors the existing empty api_key line removal.
+func TestRender_NonLiteLLM_NoBaseURLLine(t *testing.T) {
+	files, err := Render(Presets["llm-chat"], testData, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range files {
+		if strings.Contains(content, "base_url:") {
+			t.Errorf("rendered %s has an unexpected base_url line for provider %q:\n%s", name, testData.Provider, content)
 		}
 	}
 }
@@ -440,7 +536,7 @@ func contains(ss []string, target string) bool {
 // Regression: search_files and read_file in the rag-assistant preset fence
 // relative paths to allowed_paths: ["./knowledge-base/"] but set no
 // working_dir. internal/tools/fs no longer defaults working_dir to
-// allowedPaths[0] (see #28) -- without an explicit
+// allowedPaths[0] (paupawsan/rakitsu#28 / PR #407) — without an explicit
 // working_dir, a bare relative path like "doc1.md" now resolves against the
 // process cwd instead of the knowledge-base fence and gets rejected. Both
 // tools need working_dir: "./knowledge-base/" set explicitly.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,7 +24,7 @@ No YAML knowledge required — pick a template, enter your API key, and run.
 Steps:
   1. Pick a template (Chat Bot, Code Reviewer, Research Team, etc.)
   2. Pick a provider (OpenAI, Anthropic, Ollama, LiteLLM)
-  3. Enter API key (or detect from environment)
+  3. Enter API key / base URL (or detect from environment)
   4. Generate project in ./rakitsu-project/
   5. Start the web UI
 
@@ -34,6 +35,32 @@ Example:
 
 func init() {
 	rootCmd.AddCommand(quickstartCmd)
+}
+
+// quickstartProvider describes one provider choice in the wizard: its
+// display name, the scaffold provider id, and what credentials it needs
+// guidance for. envVar/needKey drive the Step 3 API-key check/prompt/warn
+// flow; baseURLEnvVar/needBaseURL drive the analogous step for providers
+// with no fixed endpoint (LiteLLM). Ollama also needs a base_url in
+// principle, but rakitsu already defaults it to http://localhost:11434/v1
+// at runtime (createLLMProvider) when unset, so it's left without
+// guidance here — there's nothing to warn the user about for the common
+// local case.
+type quickstartProvider struct {
+	name          string
+	id            string
+	envVar        string
+	needKey       bool
+	baseURLEnvVar string
+	needBaseURL   bool
+}
+
+var quickstartProviders = []quickstartProvider{
+	{name: "OpenAI", id: "openai", envVar: "OPENAI_API_KEY", needKey: true},
+	{name: "Anthropic", id: "anthropic", envVar: "ANTHROPIC_API_KEY", needKey: true},
+	{name: "Google Gemini", id: "gemini", envVar: "GEMINI_API_KEY", needKey: true},
+	{name: "Ollama (local)", id: "ollama"},
+	{name: "LiteLLM (proxy)", id: "litellm", envVar: "LITELLM_API_KEY", needKey: true, baseURLEnvVar: "LITELLM_BASE_URL", needBaseURL: true},
 }
 
 func runQuickstart(cmd *cobra.Command, args []string) error {
@@ -66,7 +93,10 @@ func runQuickstart(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println()
 	fmt.Print("  Enter number [1]: ")
-	choice := readLine(reader)
+	choice, err := mustReadLine(reader)
+	if err != nil {
+		return err
+	}
 	idx := 0
 	if choice != "" {
 		n, err := strconv.Atoi(strings.TrimSpace(choice))
@@ -79,18 +109,7 @@ func runQuickstart(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  → %s\n\n", tmpl.name)
 
 	// Step 2: Pick provider
-	providers := []struct {
-		name    string
-		id      string
-		envVar  string
-		needKey bool
-	}{
-		{"OpenAI", "openai", "OPENAI_API_KEY", true},
-		{"Anthropic", "anthropic", "ANTHROPIC_API_KEY", true},
-		{"Google Gemini", "gemini", "GEMINI_API_KEY", true},
-		{"Ollama (local)", "ollama", "", false},
-		{"LiteLLM (proxy)", "litellm", "", false},
-	}
+	providers := quickstartProviders
 
 	fmt.Println("  Pick a provider:")
 	fmt.Println()
@@ -105,7 +124,10 @@ func runQuickstart(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println()
 	fmt.Print("  Enter number [1]: ")
-	pChoice := readLine(reader)
+	pChoice, err := mustReadLine(reader)
+	if err != nil {
+		return err
+	}
 	pIdx := 0
 	if pChoice != "" {
 		n, err := strconv.Atoi(strings.TrimSpace(pChoice))
@@ -126,9 +148,37 @@ func runQuickstart(cmd *cobra.Command, args []string) error {
 			apiKey = existing
 		} else {
 			fmt.Printf("  Enter %s API key: ", prov.name)
-			apiKey = strings.TrimSpace(readLine(reader))
+			line, err := mustReadLine(reader)
+			if err != nil {
+				return err
+			}
+			apiKey = strings.TrimSpace(line)
 			if apiKey == "" {
 				fmt.Printf("  Warning: no API key provided. Set $%s before running.\n\n", prov.envVar)
+			}
+		}
+	}
+
+	// Step 3b: Base URL — providers with no fixed endpoint (LiteLLM) need
+	// one before the generated config will reach anything. Same
+	// detect/prompt/warn shape as the API key step above; the value is
+	// never written into the generated config, only used for this check
+	// (the config always references the env var by name, same as the key).
+	baseURL := ""
+	if prov.needBaseURL {
+		existing := os.Getenv(prov.baseURLEnvVar)
+		if existing != "" {
+			fmt.Printf("  Base URL detected from $%s\n\n", prov.baseURLEnvVar)
+			baseURL = existing
+		} else {
+			fmt.Printf("  Enter %s base URL (e.g. https://your-proxy-host/v1): ", prov.name)
+			line, err := mustReadLine(reader)
+			if err != nil {
+				return err
+			}
+			baseURL = strings.TrimSpace(line)
+			if baseURL == "" {
+				fmt.Printf("  Warning: no base URL provided. Set $%s before running.\n\n", prov.baseURLEnvVar)
 			}
 		}
 	}
@@ -136,7 +186,10 @@ func runQuickstart(cmd *cobra.Command, args []string) error {
 	// Step 4: Generate project
 	projectDir := "rakitsu-project"
 	fmt.Printf("  Project directory [%s]: ", projectDir)
-	dirChoice := readLine(reader)
+	dirChoice, err := mustReadLine(reader)
+	if err != nil {
+		return err
+	}
 	if dirChoice != "" {
 		projectDir = strings.TrimSpace(dirChoice)
 	}
@@ -148,7 +201,11 @@ func runQuickstart(cmd *cobra.Command, args []string) error {
 
 	// Step 4b: Single file or modular?
 	fmt.Print("  Project structure — modular (agents/, tools/ dirs) or single YAML? [M/s]: ")
-	structChoice := strings.ToLower(strings.TrimSpace(readLine(reader)))
+	structLine, err := mustReadLine(reader)
+	if err != nil {
+		return err
+	}
+	structChoice := strings.ToLower(strings.TrimSpace(structLine))
 	useModular := structChoice != "s" && structChoice != "single"
 
 	// Generate config using scaffold
@@ -161,9 +218,10 @@ func runQuickstart(cmd *cobra.Command, args []string) error {
 		model = "gpt-4o-mini"
 	}
 	data := scaffold.TemplateData{
-		Provider:  prov.id,
-		Model:     model,
-		APIKeyEnv: scaffold.APIKeyEnvVar(prov.id),
+		Provider:   prov.id,
+		Model:      model,
+		APIKeyEnv:  scaffold.APIKeyEnvVar(prov.id),
+		BaseURLEnv: scaffold.BaseURLEnvVar(prov.id),
 	}
 	files, err := scaffold.Render(preset, data, useModular)
 	if err != nil {
@@ -180,7 +238,11 @@ func runQuickstart(cmd *cobra.Command, args []string) error {
 			fmt.Printf("    %s\n", p)
 		}
 		fmt.Print("  Overwrite? [y/N]: ")
-		confirm := strings.ToLower(strings.TrimSpace(readLine(reader)))
+		confirmLine, err := mustReadLine(reader)
+		if err != nil {
+			return err
+		}
+		confirm := strings.ToLower(strings.TrimSpace(confirmLine))
 		if confirm != "y" && confirm != "yes" {
 			return fmt.Errorf("aborted: refusing to overwrite existing project files")
 		}
@@ -219,7 +281,11 @@ func runQuickstart(cmd *cobra.Command, args []string) error {
 
 	// Step 5: Start serve
 	fmt.Print("  Start web UI now? [Y/n]: ")
-	startChoice := strings.ToLower(strings.TrimSpace(readLine(reader)))
+	startLine, err := mustReadLine(reader)
+	if err != nil {
+		return err
+	}
+	startChoice := strings.ToLower(strings.TrimSpace(startLine))
 	if startChoice != "n" && startChoice != "no" {
 		fmt.Println()
 		fmt.Println("  Starting Rakitsu web UI...")
@@ -245,9 +311,32 @@ func runQuickstart(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func readLine(reader *bufio.Reader) string {
-	line, _ := reader.ReadString('\n')
-	return strings.TrimRight(line, "\r\n")
+// readLine reads one line from stdin, trimming the trailing line ending.
+// ok is false only when stdin was already at EOF with nothing left to read
+// — a real terminal never produces that (Enter always terminates a line),
+// so it means quickstart is being driven non-interactively (piped/
+// redirected/closed stdin) and the caller must abort rather than silently
+// substituting every remaining prompt's bracketed default.
+func readLine(reader *bufio.Reader) (line string, ok bool) {
+	s, err := reader.ReadString('\n')
+	if s == "" && err != nil {
+		return "", false
+	}
+	return strings.TrimRight(s, "\r\n"), true
+}
+
+// errNonInteractive is returned by mustReadLine when stdin runs out
+// mid-wizard. Its bracketed-default prompts (Overwrite? [y/N], Start web
+// UI now? [Y/n]) must never be silently answered by an absent terminal.
+var errNonInteractive = errors.New("quickstart needs an interactive terminal — stdin closed with more input expected; run it from a real shell, or use 'rakitsu scaffold <use-case>' for non-interactive project generation")
+
+// mustReadLine wraps readLine for call sites that cannot proceed on EOF.
+func mustReadLine(reader *bufio.Reader) (string, error) {
+	line, ok := readLine(reader)
+	if !ok {
+		return "", errNonInteractive
+	}
+	return line, nil
 }
 
 // existingQuickstartFiles returns the absolute paths, under absDir, of any
