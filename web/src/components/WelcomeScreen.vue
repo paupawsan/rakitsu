@@ -156,7 +156,22 @@ const canRun = computed(() => {
   if (!selectedProvider.value || !selectedModel.value) return false;
   if (needsKey.value && !apiKey.value) return false;
   if (needsUrl.value && !baseUrl.value) return false;
+  // No-key providers (Ollama) are auto-probed on selection; if that probe
+  // came back failed, running would just fail deep in the backend instead
+  // of up front — block it here and point at the reason instead.
+  if (!needsKey.value && connectionStatus.value === 'error') return false;
   return true;
+});
+
+// More actionable than the raw connectionError for the no-key (Ollama)
+// case, where "Connection failed" alone doesn't tell a first-time user
+// what to do about it.
+const displayError = computed(() => {
+  if (connectionStatus.value !== 'error') return '';
+  if (!needsKey.value) {
+    return `${connectionError.value} — install Ollama and pull a model, or pick a provider below and enter a key.`;
+  }
+  return connectionError.value;
 });
 
 function handleRun() {
@@ -267,7 +282,7 @@ onMounted(async () => {
         />
 
         <span v-if="connectionStatus === 'error'" class="field-error">
-          {{ connectionError }}
+          {{ displayError }}
         </span>
       </div>
 
