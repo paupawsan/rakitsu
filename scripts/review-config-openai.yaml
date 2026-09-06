@@ -52,7 +52,15 @@ agents:
       # rather than removed so a future switch to a non-reasoning model
       # doesn't silently inherit an unconsidered default.
       temperature: 0.3
-      max_tokens: 8192
+      # gpt-5-nano is a reasoning-tier model: max_tokens caps the combined
+      # hidden-reasoning + visible-answer budget (rakitsu routes it to
+      # OpenAI's max_completion_tokens for these models), not just the
+      # visible text. Confirmed live: 8192 was too low for a diff of any
+      # real size — the model burned the whole budget on reasoning and
+      # returned finish_reason=length with zero visible answer. Raised
+      # well above the diff-size cap's rough token footprint to leave
+      # headroom for reasoning on top of it.
+      max_tokens: 32768
     # tools: [] alone isn't what makes this agent unable to DO anything —
     # rakitsu passes an agent the WHOLE global tool registry regardless of
     # a per-agent tools: list (confirmed: internal/agent/agent.go's
