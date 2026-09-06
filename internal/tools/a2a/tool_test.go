@@ -282,6 +282,40 @@ func TestA2ATool_DefaultDescription(t *testing.T) {
 	}
 }
 
+// ─── TestNewA2ATool_TimeoutResolution ────────────────────────────────────────────
+
+// Regression: def.Timeout <= 0 used to always fall back to the hardcoded 30s
+// default, so there was no way to configure an unlimited HTTP client timeout
+// (unlike run.go's --timeout, where <=0 disables the deadline). A negative
+// value must now leave httpClient.Timeout at its zero value, which
+// net/http.Client treats as "no timeout" — bounding the call only by the
+// caller's own context.
+func TestNewA2ATool_TimeoutResolution(t *testing.T) {
+	tests := []struct {
+		name        string
+		def         int
+		wantTimeout time.Duration
+	}{
+		{"unset (0) falls back to 30s default", 0, 30 * time.Second},
+		{"positive value used as-is", 5, 5 * time.Second},
+		{"negative value disables the client timeout", -1, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tool, err := NewA2ATool(&config.ToolDefinition{
+				Name: "t", URL: "http://x", AgentName: "A", Timeout: tt.def,
+			})
+			if err != nil {
+				t.Fatalf("NewA2ATool: %v", err)
+			}
+			if tool.httpClient.Timeout != tt.wantTimeout {
+				t.Errorf("httpClient.Timeout = %v, want %v", tool.httpClient.Timeout, tt.wantTimeout)
+			}
+		})
+	}
+}
+
 // ─── TestA2ATool_PollsUntilTerminal ──────────────────────────────────────────────
 
 // A real remote agent may leave a task WORKING instead of completing it

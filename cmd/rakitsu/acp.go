@@ -42,8 +42,12 @@ Examples:
 	RunE: runACP,
 }
 
+var acpTimeoutSeconds int
+
 func init() {
 	rootCmd.AddCommand(acpCmd)
+	acpCmd.Flags().IntVar(&acpTimeoutSeconds, "timeout", 0,
+		"override settings.execution.timeout_seconds for every session/prompt turn (<=0 disables it); unset uses the pinned config, defaulting to 300s")
 }
 
 func runACP(cmd *cobra.Command, args []string) error {
@@ -64,6 +68,9 @@ func runACP(cmd *cobra.Command, args []string) error {
 	}()
 
 	srv := acp.NewServer(cfg, executeConfig)
+	if cmd.Flags().Changed("timeout") {
+		srv.SetTimeoutOverride(acpTimeoutSeconds)
+	}
 
 	fmt.Fprintln(os.Stderr, "rakitsu ACP server ready (stdin/stdout)")
 

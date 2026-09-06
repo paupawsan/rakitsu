@@ -1196,6 +1196,49 @@ func TestACP_Prompt_RespectsConfiguredTimeoutSeconds(t *testing.T) {
 	}
 }
 
+// ─── TestPromptTimeout_OverridePrecedence ──────────────────────────────────────
+
+// Regression: promptTimeout must give an explicit --timeout override (see
+// cmd/rakitsu/acp.go's SetTimeoutOverride) precedence over
+// settings.execution.timeout_seconds, and the override follows run.go's
+// <=0-disables convention directly (no "0 means unset" substitution, unlike
+// the config field, since a cobra flag can't carry "unset" the way a YAML
+// zero-value can't be told apart from "not set").
+func TestPromptTimeout_OverridePrecedence(t *testing.T) {
+	overrideOf := func(sec int) *int { return &sec }
+
+	tests := []struct {
+		name       string
+		cfgSeconds int
+		override   *int
+		wantOK     bool
+		wantDur    time.Duration
+	}{
+		{"no override, config unset -> default", 0, nil, true, defaultPromptTimeout},
+		{"no override, config negative -> disabled", -1, nil, false, 0},
+		{"no override, config positive -> as configured", 7, nil, true, 7 * time.Second},
+		{"override positive beats configured positive", 7, overrideOf(42), true, 42 * time.Second},
+		{"override positive beats configured negative (disabled)", -1, overrideOf(5), true, 5 * time.Second},
+		{"override zero disables regardless of config default", 0, overrideOf(0), false, 0},
+		{"override negative disables regardless of positive config", 99, overrideOf(-1), false, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := loadTestConfig(t)
+			cfg.Settings.Execution.TimeoutSeconds = tt.cfgSeconds
+
+			d, ok := promptTimeout(cfg, tt.override)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if ok && d != tt.wantDur {
+				t.Fatalf("duration = %v, want %v", d, tt.wantDur)
+			}
+		})
+	}
+}
+
 // ─── TestACP_Prompt_RejectsConcurrentPromptOnSameSession ───────────────────────
 
 // Regression: handlePrompt dispatches on its own goroutine per request (see

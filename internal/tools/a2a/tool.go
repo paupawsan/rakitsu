@@ -299,9 +299,16 @@ func NewA2ATool(def *config.ToolDefinition) (*A2ATool, error) {
 		desc = fmt.Sprintf("Delegate to agent %q at %s", def.AgentName, def.URL)
 	}
 
-	timeout := time.Duration(def.Timeout) * time.Second
-	if timeout <= 0 {
+	// 0 (unset) falls back to the 30s default; a negative value disables the
+	// HTTP client's own timeout entirely, leaving the call bound only by
+	// whatever context deadline the caller supplies — matching the <=0
+	// convention used elsewhere (e.g. cmd/rakitsu/run.go's --timeout).
+	var timeout time.Duration
+	switch {
+	case def.Timeout == 0:
 		timeout = 30 * time.Second
+	case def.Timeout > 0:
+		timeout = time.Duration(def.Timeout) * time.Second
 	}
 
 	return &A2ATool{
