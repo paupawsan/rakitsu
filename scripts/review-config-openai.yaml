@@ -1,13 +1,19 @@
 # Review-only config for scripts/ci-review.sh, used by the .github/workflows/
 # ai-review.yml GitHub Action. Talks to OpenAI directly (not via the
 # project's LiteLLM proxy, which is Tailscale-only and unreachable from a
-# GitHub-hosted runner). Model: gpt-5-nano — cheapest reasoning-capable
-# model on OpenAI's own catalog as of this writing. Bare model name, no
-# "openai/" prefix — that prefix is a LiteLLM routing convention; rakitsu's
-# `type: openai` provider sends the model string to OpenAI's API verbatim
-# with no prefix-stripping (see internal/llm/openai/provider.go), so an
-# "openai/"-prefixed name 400s with "invalid model ID" against the real
-# API. Confirmed against this repo's own examples/providers/openai.yaml.
+# GitHub-hosted runner). Model: gpt-5.6-luna — the same model this project
+# already uses elsewhere for "read a diff, find real bugs" review tasks.
+# Switched from the cheaper gpt-5-nano after it produced two false-positive
+# findings on a real PR (one claiming a stray YAML line the existing
+# cleanup logic already strips, one claiming a Go syntax error inside what
+# is actually a raw string literal used as test data) — worth the higher
+# per-token cost for a check whose whole value is not crying wolf. Bare
+# model name, no "openai/" prefix — that prefix is a LiteLLM routing
+# convention; rakitsu's `type: openai` provider sends the model string to
+# OpenAI's API verbatim with no prefix-stripping (see internal/llm/openai/
+# provider.go), so an "openai/"-prefixed name 400s with "invalid model ID"
+# against the real API. Confirmed against this repo's own
+# examples/providers/openai.yaml.
 #
 # Requires OPENAI_API_KEY in the environment — a GitHub Actions secret on
 # this repo, sourced from a dedicated OpenAI project + restricted key, not
@@ -27,7 +33,7 @@
 # the same no-orchestrator shape. Do not add an orchestrator back without
 # re-deriving this.
 
-name: "Diff Reviewer (gpt-5-nano, direct OpenAI)"
+name: "Diff Reviewer (gpt-5.6-luna, direct OpenAI)"
 version: "1.0"
 description: "Single-pass, whole-diff PR reviewer via direct OpenAI. Used by scripts/ci-review.sh."
 
@@ -53,15 +59,19 @@ settings:
 agents:
   - name: Reviewer
     role: worker
-    model: gpt-5-nano
+    model: gpt-5.6-luna
     model_config:
-      # temperature is a no-op here: gpt-5-nano is a reasoning-tier model,
-      # and rakitsu's OpenAI provider drops any temperature other than 1
-      # for those (with a stderr warning) rather than sending it. Left set
-      # rather than removed so a future switch to a non-reasoning model
-      # doesn't silently inherit an unconsidered default.
+      # temperature is a no-op here: gpt-5.6-luna is a reasoning-tier model
+      # (bare "gpt-5.6-luna" matches isReasoningModel's "gpt-5" prefix
+      # check, same as gpt-5-nano — the vendor-prefixed "openai/gpt-5.6-
+      # luna" LiteLLM uses elsewhere in the project is the form that
+      # misses this check, not this one), and rakitsu's OpenAI provider
+      # drops any temperature other than 1 for those (with a stderr
+      # warning) rather than sending it. Left set rather than removed so a
+      # future switch to a non-reasoning model doesn't silently inherit an
+      # unconsidered default.
       temperature: 0.3
-      # gpt-5-nano is a reasoning-tier model: max_tokens caps the combined
+      # gpt-5.6-luna is a reasoning-tier model: max_tokens caps the combined
       # hidden-reasoning + visible-answer OUTPUT budget (rakitsu routes it
       # to OpenAI's max_completion_tokens for these models), not just the
       # visible text — a separate axis from MAX_DIFF_BYTES in ci-review.sh,

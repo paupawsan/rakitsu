@@ -12,6 +12,16 @@ silently dropping them. Any OTHER failure (bad token, rate limit, a
 there wouldn't fix anything and could risk a duplicate post if the
 original request actually landed server-side despite a network error.
 
+The review itself always posts as event "COMMENT" — it never requests
+changes as a GitHub review state. Instead, once the review is posted,
+this exits non-zero whenever the result carried at least one real
+finding (result["comments"] is non-empty), which fails the Action's own
+check (a red X in the PR's checks list) without touching GitHub's
+review-approval mechanics or requiring branch protection to be
+reconfigured. A skipped review (diff too large/empty) or a clean
+NO FINDINGS both parse to an empty comments list (see
+parse-findings.py) and exit 0, same as always.
+
 Usage: post-review.py <result-json> <repo> <pr-number> <commit-sha>
 """
 import json
@@ -62,6 +72,15 @@ def main() -> int:
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr)
         return proc.returncode
+
+    if comments:
+        plural = "" if len(comments) == 1 else "s"
+        sys.stderr.write(
+            f"Review posted with {len(comments)} finding{plural} — "
+            "failing this check so they get a look before merge.\n"
+        )
+        return 1
+
     return 0
 
 
