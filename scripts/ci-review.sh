@@ -14,7 +14,11 @@
 # Usage: scripts/ci-review.sh <full|incremental> <base-ref> <head-ref> <output-file>
 set -euo pipefail
 
-MAX_DIFF_BYTES=200000  # matches scripts/review-pr-diff.sh's existing cap
+MAX_DIFF_BYTES=120000  # kept under Linux's per-argv MAX_ARG_STRLEN (128 KiB):
+# the whole diff becomes one argv element to `rakitsu run` below, and
+# Linux's execve() rejects any single argument over 131072 bytes
+# regardless of ulimit/ARG_MAX — a higher cap here would let some diffs
+# through that then fail with a bare "Argument list too long".
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG="$SCRIPT_DIR/review-config-openai.yaml"
@@ -32,8 +36,14 @@ case "$MODE" in
   *) echo "FATAL: mode must be 'full' or 'incremental', got: $MODE" >&2; exit 1 ;;
 esac
 
-git rev-parse --verify --quiet "$BASE" >/dev/null || { echo "FATAL: bad ref: $BASE" >&2; exit 1; }
-git rev-parse --verify --quiet "$HEAD" >/dev/null || { echo "FATAL: bad ref: $HEAD" >&2; exit 1; }
+# `^{commit}` matters: a bare 40-hex string always "verifies" under
+# `git rev-parse --verify` whether or not the object actually exists
+# locally (git accepts it as a well-formed name without checking the
+# object database) — the `^{commit}` dereference is what actually forces
+# the lookup, so a genuinely missing object fails here with a clear
+# message instead of a bare `git diff` crash three lines down.
+git rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "FATAL: bad ref (not fetched locally?): $BASE" >&2; exit 1; }
+git rev-parse --verify --quiet "$HEAD^{commit}" >/dev/null || { echo "FATAL: bad ref (not fetched locally?): $HEAD" >&2; exit 1; }
 : "${OPENAI_API_KEY:?OPENAI_API_KEY not set}"
 
 if [ "$MODE" = "full" ]; then

@@ -60,6 +60,21 @@ def main() -> int:
 
     plural = "" if len(comments) == 1 else "s"
     summary = f"Found {len(comments)} issue{plural} — see inline comment{plural} below."
+
+    # A well-formed block always opens with "### FINDING" — if the model
+    # started more of them than we could actually parse (a mismatched
+    # template, a truncated final block cut off by max_tokens, whatever
+    # the cause), that's a real, silent loss of findings unless we say so
+    # here. Never drop it quietly: name the gap and attach the raw text.
+    total_markers = len(re.findall(r"^### FINDING\b", raw, re.M))
+    if total_markers > len(matches):
+        summary += (
+            f"\n\n**Note:** the model's response contained {total_markers} "
+            f"`### FINDING` marker(s) but only {len(matches)} parsed "
+            "cleanly — the rest may be malformed or truncated. Raw model "
+            f"output, for reference:\n\n```\n{raw.strip()}\n```"
+        )
+
     result = {"body": preamble + "\n\n" + summary, "comments": comments}
     json.dump(result, sys.stdout)
     return 0
