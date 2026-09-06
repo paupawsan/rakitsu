@@ -136,6 +136,24 @@ chmod 755 "$INSTALL_DIR/rakitsu.new"
 mv "$INSTALL_DIR/rakitsu.new" "$INSTALL_DIR/rakitsu"
 echo "Installed to ${INSTALL_DIR}/rakitsu"
 
+# macOS-only: release binaries are ad-hoc signed (Go's default), not
+# notarized with a real Apple Developer ID — Gatekeeper can silently kill
+# a freshly downloaded one on first run with no dialog, just a bare
+# "killed" from the shell. Not every macOS setup hits this, but there's no
+# way to know in advance, so the note is unconditional on this OS rather
+# than only printed after a failure this script has no way to detect.
+if [ "$OS" = "darwin" ]; then
+  echo ""
+  echo "macOS note: if running 'rakitsu' gets silently killed, that's"
+  echo "Gatekeeper blocking an unsigned/unnotarized binary, not a broken"
+  echo "install. Try:"
+  echo "  xattr -cr ${INSTALL_DIR}/rakitsu"
+  echo "If it's still killed after that:"
+  echo "  sudo spctl --add ${INSTALL_DIR}/rakitsu"
+  echo "or System Settings -> Privacy & Security -> scroll down to the"
+  echo "blocked-item notice for rakitsu -> Open Anyway."
+fi
+
 # Check PATH (colon-delimited exact match, not a substring search)
 case ":${PATH:-}:" in
   *:"$INSTALL_DIR":*)
