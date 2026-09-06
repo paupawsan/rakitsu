@@ -37,6 +37,16 @@ rakitsu serve
 
 Open **http://localhost:9100** — drag agents onto the canvas, wire up tools, hit Run.
 
+Rakitsu doesn't run inference itself — you need access to a model, either
+your own [Ollama](https://ollama.com) running locally or an API key for
+OpenAI, Anthropic, Gemini, or a LiteLLM proxy.
+
+No API key? Click **Run the Demo** on the welcome screen and pick Ollama —
+still needs a local Ollama install with a model pulled (`ollama pull
+llama3.2`), just no cloud key. It's a pre-wired run with breakpoints
+already set, so you can see the visual builder and live debugger in action
+before writing a config.
+
 > **macOS:** release binaries aren't notarized yet, so Gatekeeper can silently
 > kill a freshly downloaded `rakitsu` on first run (no dialog, just "killed").
 > If that happens: `xattr -cr $(command -v rakitsu)`, and if it's still
