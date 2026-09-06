@@ -58,7 +58,7 @@ preamble() {
 ## Automated review
 
 This review was generated automatically by this repo's automated review
-pipeline, not a human — it ran rakitsu against openai/gpt-5-nano over
+pipeline, not a human — it ran rakitsu against openai/gpt-5.6-luna over
 $SCOPE_TEXT, reading file content and diffs as text only, no code
 execution. Treat findings as a starting point to verify, not a final word.
 
