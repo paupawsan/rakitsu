@@ -4,7 +4,7 @@ package scaffold
 // Preset is a named use-case configuration template.
 // SingleFile contains the single-YAML template string.
 // DirFiles maps relative file paths to their template strings for modular output.
-// Template variables: {{.Provider}}, {{.Model}}, {{.APIKeyEnv}}
+// Template variables: {{.Provider}}, {{.Model}}, {{.APIKeyEnv}}, {{.BaseURLEnv}}
 type Preset struct {
 	ID          string
 	Description string
@@ -15,9 +15,10 @@ type Preset struct {
 
 // TemplateData holds the variables interpolated into preset templates.
 type TemplateData struct {
-	Provider  string // e.g. "openai"
-	Model     string // e.g. "gpt-4o-mini"
-	APIKeyEnv string // e.g. "OPENAI_API_KEY"
+	Provider   string // e.g. "openai"
+	Model      string // e.g. "gpt-4o-mini"
+	APIKeyEnv  string // e.g. "OPENAI_API_KEY"
+	BaseURLEnv string // e.g. "LITELLM_BASE_URL"; empty when the provider needs no base_url
 }
 
 // ProviderDefaults maps provider name to its default model.
@@ -26,6 +27,10 @@ var ProviderDefaults = map[string]string{
 	"anthropic": "claude-haiku-4-5",
 	"gemini":    "gemini-3.1-flash-lite-preview",
 	"ollama":    "llama3.2",
+	// LiteLLM aliases are user-defined on their own proxy — there's no
+	// universal default model name, so this is a placeholder the user is
+	// expected to replace (same convention as test/configs/litellm-dev-team).
+	"litellm": "your-model-alias",
 }
 
 // APIKeyEnvVar returns the canonical env var name for a provider's API key.
@@ -37,8 +42,25 @@ func APIKeyEnvVar(provider string) string {
 		return "GEMINI_API_KEY"
 	case "ollama":
 		return "" // no API key needed
+	case "litellm":
+		return "LITELLM_API_KEY"
 	default:
 		return "OPENAI_API_KEY"
+	}
+}
+
+// BaseURLEnvVar returns the canonical env var name for a provider's base
+// URL, or "" if the provider needs none in the generated config. Ollama
+// needs a base_url too, but rakitsu already defaults it to
+// http://localhost:11434/v1 at runtime when unset (see createLLMProvider in
+// cmd/rakitsu/run.go), so it's deliberately left out here. LiteLLM has no
+// such runtime default — its proxy address is always user-specific.
+func BaseURLEnvVar(provider string) string {
+	switch provider {
+	case "litellm":
+		return "LITELLM_BASE_URL"
+	default:
+		return ""
 	}
 }
 
@@ -86,6 +108,7 @@ settings:
     {{.Provider}}:
       type: {{.Provider}}
       api_key: "${{{.APIKeyEnv}}}"
+      base_url: "${{{.BaseURLEnv}}}"
   defaults:
     model: {{.Model}}
     temperature: 0.7
@@ -111,6 +134,7 @@ settings:
     {{.Provider}}:
       type: {{.Provider}}
       api_key: "${{{.APIKeyEnv}}}"
+      base_url: "${{{.BaseURLEnv}}}"
   defaults:
     model: {{.Model}}
     temperature: 0.7
@@ -146,6 +170,7 @@ settings:
     {{.Provider}}:
       type: {{.Provider}}
       api_key: "${{{.APIKeyEnv}}}"
+      base_url: "${{{.BaseURLEnv}}}"
   defaults:
     model: {{.Model}}
     temperature: 0.2
@@ -206,6 +231,7 @@ settings:
     {{.Provider}}:
       type: {{.Provider}}
       api_key: "${{{.APIKeyEnv}}}"
+      base_url: "${{{.BaseURLEnv}}}"
   defaults:
     model: {{.Model}}
     temperature: 0.2
@@ -275,6 +301,7 @@ settings:
     {{.Provider}}:
       type: {{.Provider}}
       api_key: "${{{.APIKeyEnv}}}"
+      base_url: "${{{.BaseURLEnv}}}"
   defaults:
     model: {{.Model}}
     temperature: 0.1
@@ -349,6 +376,7 @@ settings:
     {{.Provider}}:
       type: {{.Provider}}
       api_key: "${{{.APIKeyEnv}}}"
+      base_url: "${{{.BaseURLEnv}}}"
   defaults:
     model: {{.Model}}
     temperature: 0.1
@@ -432,6 +460,7 @@ settings:
     {{.Provider}}:
       type: {{.Provider}}
       api_key: "${{{.APIKeyEnv}}}"
+      base_url: "${{{.BaseURLEnv}}}"
   defaults:
     model: {{.Model}}
     temperature: 0.3
@@ -468,6 +497,7 @@ settings:
     {{.Provider}}:
       type: {{.Provider}}
       api_key: "${{{.APIKeyEnv}}}"
+      base_url: "${{{.BaseURLEnv}}}"
   defaults:
     model: {{.Model}}
     temperature: 0.3
@@ -514,6 +544,7 @@ settings:
     {{.Provider}}:
       type: {{.Provider}}
       api_key: "${{{.APIKeyEnv}}}"
+      base_url: "${{{.BaseURLEnv}}}"
   defaults:
     model: {{.Model}}
     temperature: 0.3
@@ -595,6 +626,7 @@ settings:
     {{.Provider}}:
       type: {{.Provider}}
       api_key: "${{{.APIKeyEnv}}}"
+      base_url: "${{{.BaseURLEnv}}}"
   defaults:
     model: {{.Model}}
     temperature: 0.3
@@ -696,6 +728,7 @@ settings:
     {{.Provider}}:
       type: {{.Provider}}
       api_key: "${{{.APIKeyEnv}}}"
+      base_url: "${{{.BaseURLEnv}}}"
   defaults:
     model: {{.Model}}
     temperature: 0.2
@@ -766,6 +799,7 @@ settings:
     {{.Provider}}:
       type: {{.Provider}}
       api_key: "${{{.APIKeyEnv}}}"
+      base_url: "${{{.BaseURLEnv}}}"
   defaults:
     model: {{.Model}}
     temperature: 0.2
@@ -855,6 +889,7 @@ settings:
     {{.Provider}}:
       type: {{.Provider}}
       api_key: "${{{.APIKeyEnv}}}"
+      base_url: "${{{.BaseURLEnv}}}"
   defaults:
     model: {{.Model}}
     temperature: 0.3
@@ -926,6 +961,7 @@ settings:
     {{.Provider}}:
       type: {{.Provider}}
       api_key: "${{{.APIKeyEnv}}}"
+      base_url: "${{{.BaseURLEnv}}}"
   defaults:
     model: {{.Model}}
     temperature: 0.3
@@ -1006,6 +1042,7 @@ settings:
     {{.Provider}}:
       type: {{.Provider}}
       api_key: "${{{.APIKeyEnv}}}"
+      base_url: "${{{.BaseURLEnv}}}"
   defaults:
     model: {{.Model}}
     temperature: 0.3
@@ -1071,6 +1108,7 @@ settings:
     {{.Provider}}:
       type: {{.Provider}}
       api_key: "${{{.APIKeyEnv}}}"
+      base_url: "${{{.BaseURLEnv}}}"
   defaults:
     model: {{.Model}}
     temperature: 0.3
@@ -1148,6 +1186,7 @@ settings:
     {{.Provider}}:
       type: {{.Provider}}
       api_key: "${{{.APIKeyEnv}}}"
+      base_url: "${{{.BaseURLEnv}}}"
   defaults:
     model: {{.Model}}
     temperature: 0.2
@@ -1215,6 +1254,7 @@ settings:
     {{.Provider}}:
       type: {{.Provider}}
       api_key: "${{{.APIKeyEnv}}}"
+      base_url: "${{{.BaseURLEnv}}}"
   defaults:
     model: {{.Model}}
     temperature: 0.2

@@ -78,14 +78,29 @@ const protocolVersion = 1
 const defaultPromptTimeout = 300 * time.Second
 
 // promptTimeout resolves the duration that bounds one session/prompt turn.
-// Mirrors cmd/rakitsu/run.go's resolveTimeoutSeconds precedence for
-// settings.execution.timeout_seconds — this is the same config field, and
-// cmd/rakitsu/acp.go's help text promises a session runs the pinned config
-// "the same way" rakitsu run does, so the two must agree: 0 (unset) falls
-// back to defaultPromptTimeout, a positive value is used as-is, and a
-// negative value means no timeout at all (ok=false — the caller must not
-// apply a deadline).
-func promptTimeout(cfg *config.Config) (d time.Duration, ok bool) {
+// Precedence: an explicit override (the process's --timeout flag, see
+// cmd/rakitsu/acp.go) beats settings.execution.timeout_seconds, which beats
+// defaultPromptTimeout — mirroring cmd/rakitsu/run.go's resolveTimeoutSeconds
+// flag-over-config precedence, since ACP has no per-request timeout field to
+// carry this instead (real ACP's PromptRequest has none).
+//
+// override, when non-nil, came from an explicit --timeout flag and is used
+// as-is with run.go's <=0-disables convention (contextWithOptionalTimeout):
+// the flag has no "unset" value of its own to distinguish from an intentional
+// 0, so there is no default-substitution step here.
+//
+// Without an override, the config field applies: 0 (unset) falls back to
+// defaultPromptTimeout, a positive value is used as-is, and a negative value
+// means no timeout at all (ok=false — the caller must not apply a deadline).
+// YAML's zero-value can't distinguish "unset" from "explicit 0" the way a
+// cobra flag can, hence the different treatment of 0 between the two paths.
+func promptTimeout(cfg *config.Config, override *int) (d time.Duration, ok bool) {
+	if override != nil {
+		if *override <= 0 {
+			return 0, false
+		}
+		return time.Duration(*override) * time.Second, true
+	}
 	switch sec := cfg.Settings.Execution.TimeoutSeconds; {
 	case sec == 0:
 		return defaultPromptTimeout, true
@@ -102,13 +117,14 @@ func promptTimeout(cfg *config.Config) (d time.Duration, ok bool) {
 // (see cmd/rakitsu/acp.go) — real ACP's session/new has no config-path field,
 // so every session this process serves runs against the same cfg.
 type Server struct {
-	runFunc  RunFunc
-	cfg      *config.Config
-	in       io.Reader
-	out      io.Writer
-	mu       sync.Mutex // protects writes to out
-	sessions *sessionMap
-	wg       sync.WaitGroup // tracks all in-flight dispatch work
+	runFunc         RunFunc
+	cfg             *config.Config
+	timeoutOverride *int // explicit --timeout flag value, if any; see promptTimeout
+	in              io.Reader
+	out             io.Writer
+	mu              sync.Mutex // protects writes to out
+	sessions        *sessionMap
+	wg              sync.WaitGroup // tracks all in-flight dispatch work
 
 	shutdownMu sync.Mutex // guards stopped, serializing it against wg.Add in the reader loop
 	stopped    bool       // set before wg.Wait(); see Run's comment
@@ -123,6 +139,14 @@ func NewServer(cfg *config.Config, runFunc RunFunc) *Server {
 		runFunc:  runFunc,
 		sessions: newSessionMap(),
 	}
+}
+
+// SetTimeoutOverride pins an explicit --timeout value (see cmd/rakitsu/acp.go)
+// that beats settings.execution.timeout_seconds for every session/prompt turn
+// this server handles. seconds <= 0 disables the deadline entirely, matching
+// cmd/rakitsu/run.go's --timeout flag convention.
+func (s *Server) SetTimeoutOverride(seconds int) {
+	s.timeoutOverride = &seconds
 }
 
 // NewServerWithIO creates an ACP server with injected I/O (for testing).
@@ -395,7 +419,7 @@ func (s *Server) handlePrompt(ctx context.Context, req acpRequest) {
 
 	var runCtx context.Context
 	var cancel context.CancelFunc
-	if d, hasTimeout := promptTimeout(s.cfg); hasTimeout {
+	if d, hasTimeout := promptTimeout(s.cfg, s.timeoutOverride); hasTimeout {
 		runCtx, cancel = context.WithTimeout(ctx, d)
 	} else {
 		runCtx, cancel = context.WithCancel(ctx)

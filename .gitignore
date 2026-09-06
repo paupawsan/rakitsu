@@ -24,6 +24,12 @@ go.work.sum
 # Claude Code
 .claude/
 
+# Other AI coding tools (local-only, may carry hardcoded local paths)
+.codex/
+.agents/
+.playwright-mcp/
+.private/
+
 # Git worktrees
 .worktrees/
 

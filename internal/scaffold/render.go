@@ -73,18 +73,31 @@ func renderTemplate(tmpl string, data TemplateData) (string, error) {
 	if strings.Contains(data.APIKeyEnv, `\`) {
 		return "", fmt.Errorf(`api key env var must not contain a '\'`)
 	}
+	// BaseURLEnv lands in the same quoted-scalar context (base_url: "${...}")
+	// as APIKeyEnv — same three checks apply.
+	if strings.ContainsAny(data.BaseURLEnv, "\n\r") {
+		return "", fmt.Errorf("base url env var must not contain a newline")
+	}
+	if strings.Contains(data.BaseURLEnv, `"`) {
+		return "", fmt.Errorf(`base url env var must not contain a '"'`)
+	}
+	if strings.Contains(data.BaseURLEnv, `\`) {
+		return "", fmt.Errorf(`base url env var must not contain a '\'`)
+	}
 
 	r := strings.NewReplacer(
 		"{{.Provider}}", data.Provider,
 		"{{.Model}}", data.Model,
 		"{{.APIKeyEnv}}", data.APIKeyEnv,
+		"{{.BaseURLEnv}}", data.BaseURLEnv,
 	)
 	result := r.Replace(tmpl)
 
-	// Remove api_key lines with empty env var (e.g. Ollama needs no key)
+	// Remove api_key/base_url lines with an empty env var (e.g. Ollama needs
+	// no key, and most providers need no base_url).
 	var lines []string
 	for _, line := range strings.Split(result, "\n") {
-		if strings.Contains(line, `api_key: "${}"`) {
+		if strings.Contains(line, `api_key: "${}"`) || strings.Contains(line, `base_url: "${}"`) {
 			continue
 		}
 		lines = append(lines, line)
