@@ -80,11 +80,21 @@ jobs:
       # gets its own graceful skip here rather than a red X.
       - name: Resolve PR
         id: resolve
+        env:
+          # workflow_dispatch's `type: number` is a UI hint only — the
+          # dispatch REST API doesn't enforce it — so this is the one
+          # value in this file whose integer-ness isn't otherwise
+          # guaranteed. Routed through env: (a real variable) rather than
+          # `${{ }}`-interpolated directly into the script, so the
+          # digit-only check below validates the actual value the shell
+          # sees instead of validating after an unsafe substitution
+          # already happened.
+          PR_NUMBER_INPUT: ${{ inputs.pr_number }}
         run: |
           case "${{ github.event_name }}" in
             pull_request) NUM="${{ github.event.pull_request.number }}" ;;
             issue_comment) NUM="${{ github.event.issue.number }}" ;;
-            workflow_dispatch) NUM="${{ inputs.pr_number }}" ;;
+            workflow_dispatch) NUM="$PR_NUMBER_INPUT" ;;
           esac
           case "$NUM" in
             ''|*[!0-9]*) echo "FATAL: bad PR number: $NUM" >&2; exit 1 ;;
@@ -134,6 +144,7 @@ jobs:
         if: steps.resolve.outputs.skip != 'true'
         run: |
           AUTH=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$AUTH"
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH" \
             fetch --no-tags origin "pull/${{ steps.resolve.outputs.number }}/head"
 
