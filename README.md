@@ -37,6 +37,17 @@ rakitsu serve
 
 Open **http://localhost:9100** — drag agents onto the canvas, wire up tools, hit Run.
 
+`rakitsu serve` runs in the foreground and keeps that terminal busy — that's
+expected, it's the server. Leave it running and open a **new terminal tab**
+for anything else (editing files, running `rakitsu run`, etc). Ctrl+C stops it.
+
+There are two ways to run an agent once `serve` is up:
+- **Click Run in the browser** — the whole run happens inside the `serve`
+  process itself. No other terminal needed.
+- **`rakitsu run config.yaml "query"`** from a second terminal — runs as its
+  own CLI process and, if `serve` is already running, shows up live as a
+  card at http://localhost:9100 so you can watch it in the debugger.
+
 Rakitsu doesn't run inference itself — you need access to a model, either
 your own [Ollama](https://ollama.com) running locally or an API key for
 OpenAI, Anthropic, Gemini, or a LiteLLM proxy.

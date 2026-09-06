@@ -14,6 +14,12 @@ rakitsu serve --port 9100
 # Open http://localhost:9100
 ```
 
+**First launch, nothing in the config list?** `serve` only shows configs
+found under `.`, `./examples`, `./configs` (or `--config-dir`), relative to
+wherever you ran it from. If you don't have a project yet, run `rakitsu
+quickstart` first — or open `examples/` and pick one to try the UI against
+before writing your own config.
+
 ---
 
 ## Visual Builder

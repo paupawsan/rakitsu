@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 // ============================================================
@@ -231,6 +233,63 @@ func TestServeCmd_DefinesRun(t *testing.T) {
 	if serveCmd.Run == nil {
 		t.Fatal("serveCmd.Run is nil — runQuickstart invokes serveCmd.Run directly; " +
 			"serve must keep a Run handler (not RunE-only) or quickstart will panic")
+	}
+}
+
+// Regression: the "Start web UI now?" auto-launch used to call serveCmd.Run
+// from whatever directory quickstart itself was invoked in, never the
+// project directory it just created. serve's ConfigStore only scans ".",
+// "./examples", "./configs" relative to its own working directory (see
+// cmd/rakitsu/serve.go), so the freshly generated project was invisible in
+// the web UI's config list unless the chosen project dir happened to be
+// ".". Guards that the auto-launch chdirs into the project directory
+// first. Stubs serveCmd.Run so no real server starts.
+func TestRunQuickstart_StartWebUI_ChdirsIntoProjectDir(t *testing.T) {
+	origStdin := os.Stdin
+	t.Cleanup(func() { os.Stdin = origStdin })
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// template(blank) provider(4=ollama, no key/base_url prompts)
+	// dir(blank) structure(blank) start-web-ui(blank=default Y)
+	go func() {
+		w.WriteString("\n4\n\n\n\n") //nolint:errcheck
+		w.Close()
+	}()
+	os.Stdin = r
+
+	baseDir := t.TempDir()
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(baseDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(origWd) }) //nolint:errcheck
+
+	origRun := serveCmd.Run
+	var gotWd string
+	serveCmd.Run = func(cmd *cobra.Command, args []string) {
+		gotWd, _ = os.Getwd()
+	}
+	t.Cleanup(func() { serveCmd.Run = origRun })
+
+	if err := runQuickstart(quickstartCmd, nil); err != nil {
+		t.Fatalf("runQuickstart returned an error: %v", err)
+	}
+
+	wantWd, err := filepath.EvalSymlinks(filepath.Join(baseDir, "rakitsu-project"))
+	if err != nil {
+		t.Fatalf("resolving expected project dir: %v", err)
+	}
+	gotWdResolved, err := filepath.EvalSymlinks(gotWd)
+	if err != nil {
+		t.Fatalf("resolving serve's working dir %q: %v", gotWd, err)
+	}
+	if gotWdResolved != wantWd {
+		t.Errorf("serve launched from %q, want project dir %q", gotWdResolved, wantWd)
 	}
 }
 
