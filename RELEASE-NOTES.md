@@ -25,6 +25,8 @@ day locally).
 | Version | First published (UTC) | Converts to Apache 2.0 (UTC) |
 |---|---|---|
 | [v0.2.0-alpha.1](https://github.com/paupawsan/rakitsu/releases/tag/v0.2.0-alpha.1) | 2026-09-05T23:26:49Z | 2030-09-05T23:26:49Z |
+| [v0.2.0-alpha.2](https://github.com/paupawsan/rakitsu/releases/tag/v0.2.0-alpha.2) | 2026-09-06T02:07:06Z | 2030-09-06T02:07:06Z |
+| [v0.2.0-alpha.3](https://github.com/paupawsan/rakitsu/releases/tag/v0.2.0-alpha.3) | 2026-09-06T06:36:17Z | 2030-09-06T06:36:17Z |
 
 Add a row here whenever a new tag is released. Use the release's own
 `published_at` timestamp — `gh release view <tag> --json publishedAt`, or
