@@ -750,8 +750,13 @@ func (m Model) View() string {
 		return clampToHeight(m.renderPopupBox("Agents", m.agentPicker()), m.height)
 	}
 
-	// Title bar
-	title := titleStyle.Render(fmt.Sprintf(" rakitsu chat · %s · %s ", m.agentName, m.modelName))
+	// Title bar. Truncated to m.width before styling — same technique as
+	// renderStickyHeader below — because clampToHeight only counts logical
+	// lines: a line the terminal has to physically wrap counts as 1 line to
+	// clampToHeight but 2 rows on screen, which desyncs bubbletea's
+	// alt-screen redraw and leaves stale frames behind. A long LiteLLM
+	// model alias in m.modelName is exactly what triggers it.
+	title := titleStyle.Render(clampVisibleWidth(fmt.Sprintf(" rakitsu chat · %s · %s ", m.agentName, m.modelName), m.width))
 
 	// Sticky user-prompt header — kept in view while scrolling through the
 	// current turn's response, so the question being answered is always
@@ -814,6 +819,24 @@ func clampToHeight(s string, height int) string {
 	return s + strings.Repeat("\n", height-len(lines))
 }
 
+// clampVisibleWidth truncates raw (unstyled) text to at most width visible
+// columns, appending an ellipsis when it had to cut. Must be called on raw
+// text BEFORE a lipgloss style is applied — truncating an already-styled
+// (ANSI-escaped) string with runewidth would risk cutting mid-escape-sequence
+// or miscounting width from the invisible escape bytes. Same technique
+// renderStickyHeader already uses below. A width < 4 is floored to 4 so the
+// ellipsis always has room; width <= 0 (before the first WindowSizeMsg)
+// returns s unchanged.
+func clampVisibleWidth(s string, width int) string {
+	if width <= 0 {
+		return s
+	}
+	if width < 4 {
+		width = 4
+	}
+	return runewidth.Truncate(s, width, "…")
+}
+
 // --- Key handling ---
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -872,6 +895,26 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyCtrlG:
 		// Push the current thread's last reply into the main conversation.
 		return m.pushThreadReply()
+
+	case tea.KeyCtrlO:
+		// Scroll the transcript a page up — the chat TUI runs without a
+		// mouse ProgramOption (see cmd/rakitsu/interactive.go — removed so
+		// native click-drag-select works), so the mouse wheel no longer
+		// scrolls the viewport. Two prior choices for the keyboard
+		// replacement didn't survive contact with a real Mac: PgUp isn't a
+		// real key without Fn (some terminals don't even forward Fn+Up as
+		// PgUp), and Alt+Up (Option+Up) turned out not to reach the app as
+		// an Alt-modified key on this terminal either — confirmed with
+		// `cat -v` capturing nothing usable. A plain Ctrl+<letter> is a
+		// raw control byte (1-26), not an escape sequence a terminal has
+		// to choose to send, so it can't have the same failure mode —
+		// Ctrl+Y/Ctrl+P/Ctrl+U etc. already prove that class works here.
+		m.viewport.PageUp()
+		return m, nil
+
+	case tea.KeyCtrlL:
+		m.viewport.PageDown()
+		return m, nil
 
 	case tea.KeyTab:
 		// Context-sensitive: complete a half-typed agent name, else cycle
@@ -1596,6 +1639,14 @@ func (m *Model) collapseAllReasoning() {
 // handleMouse routes mouse events: the wheel scrolls the viewport, a left
 // click on a tool/reasoning block toggles its collapsed state. Motion and
 // press events are ignored (no re-render — avoids motion-event storms).
+//
+// Currently unreachable: cmd/rakitsu/interactive.go's tea.NewProgram(...)
+// no longer passes a mouse ProgramOption (removed so native click-drag
+// text selection works — see the Ctrl+O/Ctrl+L cases in handleKey for the
+// keyboard scroll replacement), and bubbletea never emits tea.MouseMsg
+// without one.
+// Left in place, not deleted, as the starting point for ROADMAP M2.5 phase
+// 2 ("Mouse interaction"), which would reintroduce a mouse ProgramOption.
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	switch msg.Button {
 	case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
@@ -1871,24 +1922,38 @@ func (m Model) updateAgentUsageEnd(msg AgentEndMsg) (Model, tea.Cmd) {
 }
 
 func (m Model) statusBar() string {
-	left := statusStyle.Render(fmt.Sprintf(" tokens: %d", m.totalTokens))
-	right := ""
+	leftRaw := fmt.Sprintf(" tokens: %d", m.totalTokens)
+	var rightRaw string
 	switch {
 	case m.waitingForInput:
 		// Agent is paused on user_input, not generating. Show the pause
 		// reason instead of the misleading "generating..." label.
-		right = statusStyle.Render("⏸ waiting for your answer · Enter to send")
+		rightRaw = "⏸ waiting for your answer · Enter to send"
 	case m.generating && m.isThinking():
 		// Reasoning models stream CoT before any answer text — surface it
-		// as progress so the UI doesn't read as frozen.
-		right = statusStyle.Render(m.spinner.View() + " thinking...")
+		// as progress so the UI doesn't read as frozen. spinner.View() is
+		// plain text here (no .Style configured on m.spinner), so it's
+		// safe to clamp below alongside the rest of rightRaw.
+		rightRaw = m.spinner.View() + " thinking..."
 	case m.generating:
-		right = statusStyle.Render(m.spinner.View() + " generating...")
+		rightRaw = m.spinner.View() + " generating..."
 	case m.notice != "":
-		right = statusStyle.Render(m.notice)
+		rightRaw = m.notice
 	default:
-		right = statusStyle.Render("Enter send · Ctrl+Y copy · Ctrl+P older · Ctrl+C quit")
+		rightRaw = "Enter send · Ctrl+Y copy · Ctrl+P older · Ctrl+O/L scroll · Ctrl+C quit"
 	}
+
+	// Truncate the raw text before styling — same reasoning as the title
+	// bar in View(): a long notice (or, now, the longer default hint) must
+	// never push this line past m.width and physically wrap.
+	avail := m.width - runewidth.StringWidth(leftRaw)
+	if avail < 4 {
+		avail = 4
+	}
+	rightRaw = clampVisibleWidth(rightRaw, avail)
+
+	left := statusStyle.Render(leftRaw)
+	right := statusStyle.Render(rightRaw)
 
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 0 {
