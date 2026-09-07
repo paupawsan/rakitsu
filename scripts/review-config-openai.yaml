@@ -106,6 +106,16 @@ agents:
       bugs, race conditions, resource leaks, and security issues introduced
       or exposed by this diff. Do not comment on style.
 
+      When a diff adds or changes a bound, clamp, or length check on some
+      value, do not stop at confirming the clamp exists — trace every other
+      value that combines with it into the same final result (a sum, a
+      concatenation, an offset) and check whether each of those is actually
+      bounded too, not just the one the commit message or comment describes.
+      A fix that clamps one side of a two-sided calculation while leaving
+      the other side unbounded is a common and easy-to-miss bug shape: the
+      diff looks complete because a clamp is visibly present, but the
+      combined result can still overflow through the untouched side.
+
       For each real issue found, output a block in exactly this form:
 
       ### FINDING

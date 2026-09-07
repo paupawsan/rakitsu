@@ -489,6 +489,14 @@ func (t *Tool) executeLocalRestricted(ctx context.Context, cmd []string) (string
 	} else if t.sandbox != nil && len(t.sandbox.AllowedPaths) > 0 {
 		execCmd.Dir = t.sandbox.AllowedPaths[0]
 	}
+	// A nonexistent Dir surfaces from os/exec as "fork/exec <binary>: no such
+	// file or directory", which reads as the binary being missing — check up
+	// front so the error names the real problem (paupawsan/rakitsu#28).
+	if execCmd.Dir != "" {
+		if _, statErr := os.Stat(execCmd.Dir); statErr != nil {
+			return "", fmt.Errorf("working directory %q for command execution is not usable: %w", execCmd.Dir, statErr)
+		}
+	}
 
 	// Run in its own process group so a timeout kills the whole tree, not
 	// just the direct child — matters for whitelisted shell wrappers

@@ -31,10 +31,13 @@ func NewTool(def *config.ToolDefinition) *Tool {
 		allowedPaths = []string{"."}
 	}
 
+	// Relative paths resolve against the process working directory unless the
+	// config sets working_dir explicitly. Deliberately NOT defaulted to
+	// allowedPaths[0]: agents are prompted with paths relative to where
+	// `rakitsu run` was launched, and joining those onto a fence like
+	// ["./workspace/"] silently produced doubled trees (workspace/workspace/…)
+	// via writeFile's MkdirAll — see paupawsan/rakitsu#28.
 	workDir := def.WorkingDir
-	if workDir == "" && len(allowedPaths) > 0 && allowedPaths[0] != "." {
-		workDir = allowedPaths[0] // use first allowed path as default working dir
-	}
 
 	return &Tool{
 		name:         def.Name,
@@ -63,10 +66,10 @@ func (t *Tool) GetParametersSchema() map[string]interface{} {
 		"properties": make(map[string]interface{}),
 		"required":   []string{},
 	}
-	
+
 	props := schema["properties"].(map[string]interface{})
 	var required []string
-	
+
 	for name, param := range t.parameters {
 		prop := map[string]interface{}{
 			"type":        param.Type,
@@ -79,12 +82,12 @@ func (t *Tool) GetParametersSchema() map[string]interface{} {
 			prop["enum"] = param.Enum
 		}
 		props[name] = prop
-		
+
 		if param.Required {
 			required = append(required, name)
 		}
 	}
-	
+
 	schema["required"] = required
 	return schema
 }
@@ -114,11 +117,11 @@ func (t *Tool) Execute(ctx context.Context, args map[string]interface{}) (string
 	// Validate path is within allowed paths
 	if !t.isPathAllowed(path) {
 		return "", &PathNotAllowedError{
-			Path:   path,
+			Path:    path,
 			Allowed: t.allowedPaths,
 		}
 	}
-	
+
 	// Execute based on operation type
 	switch t.operation {
 	case "read":
@@ -211,18 +214,18 @@ func (t *Tool) readFile(ctx context.Context, path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cannot access file: %w", err)
 	}
-	
+
 	// Check if it's a directory
 	if info.IsDir() {
 		return "", fmt.Errorf("path is a directory, not a file")
 	}
-	
+
 	// Read file contents
 	content, err := ioutil.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("failed to read file: %w", err)
 	}
-	
+
 	return string(content), nil
 }
 
@@ -232,7 +235,7 @@ func (t *Tool) writeFile(ctx context.Context, path, content, mode string) (strin
 	if mode == "" {
 		mode = "write"
 	}
-	
+
 	// Create parent directories if needed
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if mkErr := os.MkdirAll(dir, 0755); mkErr != nil {
@@ -255,11 +258,11 @@ func (t *Tool) writeFile(ctx context.Context, path, content, mode string) (strin
 	default:
 		return "", fmt.Errorf("unknown write mode: %s", mode)
 	}
-	
+
 	if err != nil {
 		return "", fmt.Errorf("failed to write file: %w", err)
 	}
-	
+
 	return fmt.Sprintf("Successfully wrote %d bytes to %s", len(content), path), nil
 }
 
@@ -270,17 +273,17 @@ func (t *Tool) listDir(ctx context.Context, path, pattern string) (string, error
 	if err != nil {
 		return "", fmt.Errorf("cannot access directory: %w", err)
 	}
-	
+
 	if !info.IsDir() {
 		return "", fmt.Errorf("path is not a directory")
 	}
-	
+
 	// Read directory contents
 	entries, err := ioutil.ReadDir(path)
 	if err != nil {
 		return "", fmt.Errorf("failed to read directory: %w", err)
 	}
-	
+
 	// Filter by pattern and format output
 	var lines []string
 	for _, entry := range entries {
@@ -296,55 +299,55 @@ func (t *Tool) listDir(ctx context.Context, path, pattern string) (string, error
 			lines = append(lines, fmt.Sprintf("%s\t%s\t%d", typeStr, entry.Name(), entry.Size()))
 		}
 	}
-	
+
 	if len(lines) == 0 {
 		return "No files found matching pattern: " + pattern, nil
 	}
-	
+
 	return strings.Join(lines, "\n"), nil
 }
 
 // searchFiles searches for files matching a pattern
 func (t *Tool) searchFiles(ctx context.Context, basePath, contentPattern, filePattern string) (string, error) {
 	var results []string
-	
+
 	err := filepath.Walk(basePath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // Skip files we can't access
 		}
-		
+
 		// Skip directories
 		if info.IsDir() {
 			return nil
 		}
-		
+
 		// Check file pattern
 		matched, err := filepath.Match(filePattern, info.Name())
 		if err != nil || !matched {
 			return nil
 		}
-		
+
 		// Read file and search for content pattern
 		content, err := ioutil.ReadFile(path)
 		if err != nil {
 			return nil // Skip files we can't read
 		}
-		
+
 		if strings.Contains(string(content), contentPattern) {
 			results = append(results, path)
 		}
-		
+
 		return nil
 	})
-	
+
 	if err != nil {
 		return "", fmt.Errorf("search failed: %w", err)
 	}
-	
+
 	if len(results) == 0 {
 		return "No files found containing: " + contentPattern, nil
 	}
-	
+
 	return strings.Join(results, "\n"), nil
 }
 
