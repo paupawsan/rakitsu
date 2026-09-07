@@ -824,15 +824,27 @@ func clampToHeight(s string, height int) string {
 // text BEFORE a lipgloss style is applied — truncating an already-styled
 // (ANSI-escaped) string with runewidth would risk cutting mid-escape-sequence
 // or miscounting width from the invisible escape bytes. Same technique
-// renderStickyHeader already uses below. A width < 4 is floored to 4 so the
-// ellipsis always has room; width <= 0 (before the first WindowSizeMsg)
-// returns s unchanged.
+// renderStickyHeader already uses below.
+//
+// The result is NEVER wider than width, including at width 1-3: an earlier
+// version floored any width < 4 up to 4 "so the ellipsis always has room",
+// which meant a caller trying to fit a genuinely narrow budget (e.g.
+// statusBar() splitting m.width between two fields) got back something
+// WIDER than it asked for — reintroducing the exact overflow this helper
+// exists to prevent whenever two independently-floored calls could combine
+// past m.width (see statusBar()). runewidth.Truncate itself already
+// degrades correctly at width >= 1: with width=1 and a 1-column ellipsis,
+// it returns just "…" (still exactly 1 column) rather than overflowing —
+// it only misbehaves at width <= 0, where callers must not ask for
+// anything shown at all, which the check below handles by returning "".
+//
+// width <= 0 returns "" rather than s unchanged (a prior version's
+// behavior) — a genuinely zero/negative budget (e.g. before the first
+// tea.WindowSizeMsg, or a caller with nothing left to give this field
+// after clamping another) can only be rendered safely as nothing.
 func clampVisibleWidth(s string, width int) string {
 	if width <= 0 {
-		return s
-	}
-	if width < 4 {
-		width = 4
+		return ""
 	}
 	return runewidth.Truncate(s, width, "…")
 }
@@ -1949,17 +1961,27 @@ func (m Model) statusBar() string {
 	// this too, not just rightRaw: totalTokens is an unbounded running
 	// count, and " tokens: <N>" alone can exceed m.width on a narrow
 	// terminal over a long enough session. Clamp leftRaw first (reserving
-	// at least 4 cols for the right side) so avail below is computed from
-	// its actual post-clamp width, not its unclamped one.
+	// up to 4 cols for the right side, but never MORE than m.width itself
+	// has to give — see below) so avail is computed from leftRaw's actual
+	// post-clamp width, not its unclamped one.
+	//
+	// Both floors here used to have their own independent minimum of 4,
+	// which could both trigger on the same narrow terminal and claim 4+4=8
+	// columns combined even when m.width was e.g. 5 or 6 — reintroducing
+	// the exact overflow this function exists to prevent, just needing a
+	// narrower terminal than the original bug. Flooring at 0 instead of 4
+	// means leftMax/avail can never claim more than m.width has left to
+	// give, and clampVisibleWidth no longer inflates a small-but-positive
+	// width back up past what its caller actually asked for.
 	leftMax := m.width - 4
-	if leftMax < 4 {
-		leftMax = 4
+	if leftMax < 0 {
+		leftMax = 0
 	}
 	leftRaw = clampVisibleWidth(leftRaw, leftMax)
 
 	avail := m.width - runewidth.StringWidth(leftRaw)
-	if avail < 4 {
-		avail = 4
+	if avail < 0 {
+		avail = 0
 	}
 	rightRaw = clampVisibleWidth(rightRaw, avail)
 

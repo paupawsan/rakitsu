@@ -152,3 +152,31 @@ func TestView_HugeTokenCountFitsWidth(t *testing.T) {
 
 	assertViewFitsWidth(t, m)
 }
+
+// TestView_NarrowWidthStatusBarNoDoubleFloor is a regression for a second,
+// independent overflow in statusBar(): leftMax and avail each used to floor
+// to their own minimum of 4, so on a terminal narrow enough that m.width -
+// 4 was itself below 4 (i.e. 4 <= m.width < 8), both floors could trigger
+// at once and claim 4+4=8 columns combined — wider than m.width, the exact
+// failure class this file exists to catch, just needing a narrower
+// terminal than TestView_HugeTokenCountFitsWidth's width=20 to reach.
+// Sweeps every width from 0 to 12 (comfortably past the 4-8 danger zone,
+// including the pre-resize width=0 case) rather than picking one value,
+// since the bug was specific to a narrow band other single-width tests in
+// this file don't happen to cross.
+func TestView_NarrowWidthStatusBarNoDoubleFloor(t *testing.T) {
+	for w := 0; w <= 12; w++ {
+		m := Model{width: w, height: 24, historyIdx: -1, spinner: spinner.New()}
+		m.textarea = textarea.New()
+		m.textarea.SetHeight(3) // matches NewModel's real chrome setup
+		m = m.handleResize()
+		m.totalTokens = 999999999999
+		m.blocks = []ContentBlock{{Type: BlockUser, Text: "hi"}}
+		m.updateViewport()
+
+		out := m.statusBar()
+		if got := lipgloss.Width(out); got > w {
+			t.Errorf("width=%d: statusBar() width = %d, want <= %d: %q", w, got, w, out)
+		}
+	}
+}
