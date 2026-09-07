@@ -432,3 +432,76 @@ func TestStress_ConcurrentPathChecks(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// ============================================================
+// working-dir resolution — paupawsan/rakitsu#28
+// ============================================================
+
+// TestWrite_FencedAllowedPath_ResolvesAgainstCwd locks down the #28 fix:
+// with allowed_paths fencing a subdirectory and no explicit working_dir, a
+// relative path that already names the fenced directory resolves against the
+// process cwd — the old allowedPaths[0] default doubled it into
+// workspace/workspace/… via writeFile's MkdirAll.
+func TestWrite_FencedAllowedPath_ResolvesAgainstCwd(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll("workspace", 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	tool := newFSTool("write", []string{"./workspace/"})
+	if _, err := tool.Execute(context.Background(), map[string]interface{}{
+		"path":    "./workspace/file.txt",
+		"content": "hi",
+	}); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	if _, err := os.Stat("workspace/file.txt"); err != nil {
+		t.Errorf("expected file at cwd-relative path: %v", err)
+	}
+	if _, err := os.Stat("workspace/workspace"); err == nil {
+		t.Error("doubled workspace/workspace path was created")
+	}
+}
+
+// TestWrite_FencedAllowedPath_BareRelativeDenied: without the old fallback a
+// bare filename resolves outside the fence and must fail loudly instead of
+// being silently relocated into it.
+func TestWrite_FencedAllowedPath_BareRelativeDenied(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll("workspace", 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	tool := newFSTool("write", []string{"./workspace/"})
+	_, err := tool.Execute(context.Background(), map[string]interface{}{
+		"path":    "file.txt",
+		"content": "hi",
+	})
+	var pErr *PathNotAllowedError
+	if !errors.As(err, &pErr) {
+		t.Errorf("expected *PathNotAllowedError, got %T: %v", err, err)
+	}
+}
+
+// TestWrite_ExplicitWorkingDir_StillJoins: an explicit working_dir keeps its
+// meaning — relative paths join onto it.
+func TestWrite_ExplicitWorkingDir_StillJoins(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll("workspace", 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	tool := NewTool(&config.ToolDefinition{
+		Name:         "test-fs",
+		Description:  "test",
+		Operation:    "write",
+		AllowedPaths: []string{"./workspace/"},
+		WorkingDir:   "./workspace/",
+	})
+	if _, err := tool.Execute(context.Background(), map[string]interface{}{
+		"path":    "file.txt",
+		"content": "hi",
+	}); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	if _, err := os.Stat("workspace/file.txt"); err != nil {
+		t.Errorf("expected file under working_dir: %v", err)
+	}
+}
