@@ -11,7 +11,7 @@
 # shell-interpolated — it only ever flows through files into
 # scripts/parse-findings.py's own string/JSON handling.
 #
-# Usage: scripts/ci-review.sh <full|incremental> <base-ref> <head-ref> <output-file>
+# Usage: scripts/ci-review.sh <full|incremental> <base-ref> <head-ref> <output-file> <pr-base-ref>
 set -euo pipefail
 
 MAX_DIFF_BYTES=120000  # kept under Linux's per-argv MAX_ARG_STRLEN (128 KiB):
@@ -24,11 +24,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG="$SCRIPT_DIR/review-config-openai.yaml"
 RAKITSU_BIN="${RAKITSU_BIN:-rakitsu}"
 
-if [ $# -ne 4 ]; then
-  echo "Usage: $0 <full|incremental> <base-ref> <head-ref> <output-file>" >&2
+if [ $# -ne 5 ]; then
+  echo "Usage: $0 <full|incremental> <base-ref> <head-ref> <output-file> <pr-base-ref>" >&2
   exit 1
 fi
-MODE="$1"; BASE="$2"; HEAD="$3"; OUTPUT="$4"
+MODE="$1"; BASE="$2"; HEAD="$3"; OUTPUT="$4"; PR_BASE="$5"
+# PR_BASE is the PR's CURRENT resolved base (its target branch's tip right
+# now — what full mode's own $BASE already is). Only incremental mode uses
+# it, as a file-scope filter — see below.
 
 case "$MODE" in
   full) SCOPE_TEXT="the full PR diff" ;;
@@ -44,12 +47,30 @@ esac
 # message instead of a bare `git diff` crash three lines down.
 git rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "FATAL: bad ref (not fetched locally?): $BASE" >&2; exit 1; }
 git rev-parse --verify --quiet "$HEAD^{commit}" >/dev/null || { echo "FATAL: bad ref (not fetched locally?): $HEAD" >&2; exit 1; }
+git rev-parse --verify --quiet "$PR_BASE^{commit}" >/dev/null || { echo "FATAL: bad ref (not fetched locally?): $PR_BASE" >&2; exit 1; }
 : "${OPENAI_API_KEY:?OPENAI_API_KEY not set}"
 
 if [ "$MODE" = "full" ]; then
   diff_content=$(git diff "$BASE...$HEAD")
 else
-  diff_content=$(git diff "$BASE" "$HEAD")
+  # A plain two-dot diff between the last-reviewed commit and the new head
+  # can include content that ISN'T actually part of this PR: pushing a
+  # merge of the target branch into the PR branch (bringing in commits
+  # merged elsewhere since this PR opened) makes files identical to the
+  # target branch show up as "changed since last push", even though
+  # they're unchanged relative to the PR's own (now-updated) base — GitHub
+  # agrees with the latter, and rejects an inline comment anchored to a
+  # line it doesn't consider part of the PR's diff (HTTP 422). Restrict to
+  # paths that are ALSO part of the PR's actual current diff (three-dot
+  # against PR_BASE) so a finding can only be anchored where GitHub will
+  # actually accept it.
+  pr_files=()
+  while IFS= read -r f; do pr_files+=("$f"); done < <(git diff --name-only "$PR_BASE...$HEAD")
+  if [ "${#pr_files[@]}" -eq 0 ]; then
+    diff_content=""
+  else
+    diff_content=$(git diff "$BASE" "$HEAD" -- "${pr_files[@]}")
+  fi
 fi
 diff_bytes=$(LC_ALL=C printf '%s' "$diff_content" | wc -c)
 
