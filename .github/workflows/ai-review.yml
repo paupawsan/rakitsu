@@ -190,7 +190,8 @@ jobs:
             "${{ steps.mode.outputs.mode }}" \
             "${{ steps.mode.outputs.base }}" \
             "${{ steps.mode.outputs.head }}" \
-            review-result.json
+            review-result.json \
+            "${{ steps.resolve.outputs.base_sha }}"
 
       - name: Post review
         if: steps.resolve.outputs.skip != 'true'
