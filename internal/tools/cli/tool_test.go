@@ -679,3 +679,25 @@ func TestBuildDockerArgs_HardensContainer(t *testing.T) {
 		t.Errorf("docker args missing a writable /tmp tmpfs (needed since --read-only locks the rest of the root fs), got: %v", args)
 	}
 }
+
+// ============================================================
+// working-dir existence — paupawsan/rakitsu#28
+// ============================================================
+
+// TestExecute_MissingSandboxWorkdir_ClearError: when the exec cwd falls back
+// to sandbox.AllowedPaths[0] and that directory does not exist, the error
+// must name the working directory instead of leaking os/exec's misleading
+// "fork/exec <binary>: no such file or directory".
+func TestExecute_MissingSandboxWorkdir_ClearError(t *testing.T) {
+	tool := newTool("ls", nil, []string{"./does-not-exist-28/"})
+	_, err := tool.Execute(context.Background(), map[string]interface{}{})
+	if err == nil {
+		t.Fatal("expected error for missing working directory")
+	}
+	if strings.Contains(err.Error(), "fork/exec") {
+		t.Errorf("raw fork/exec error leaked: %v", err)
+	}
+	if !strings.Contains(err.Error(), "working directory") {
+		t.Errorf("error should name the working directory, got: %v", err)
+	}
+}
