@@ -1945,7 +1945,18 @@ func (m Model) statusBar() string {
 
 	// Truncate the raw text before styling — same reasoning as the title
 	// bar in View(): a long notice (or, now, the longer default hint) must
-	// never push this line past m.width and physically wrap.
+	// never push this line past m.width and physically wrap. leftRaw needs
+	// this too, not just rightRaw: totalTokens is an unbounded running
+	// count, and " tokens: <N>" alone can exceed m.width on a narrow
+	// terminal over a long enough session. Clamp leftRaw first (reserving
+	// at least 4 cols for the right side) so avail below is computed from
+	// its actual post-clamp width, not its unclamped one.
+	leftMax := m.width - 4
+	if leftMax < 4 {
+		leftMax = 4
+	}
+	leftRaw = clampVisibleWidth(leftRaw, leftMax)
+
 	avail := m.width - runewidth.StringWidth(leftRaw)
 	if avail < 4 {
 		avail = 4

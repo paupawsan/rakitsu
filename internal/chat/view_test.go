@@ -82,6 +82,16 @@ func assertViewFitsWidth(t *testing.T, m Model) {
 	if len(lines) != m.height {
 		t.Fatalf("View() produced %d lines, want exactly %d", len(lines), m.height)
 	}
+	// The status bar is the LAST line View() composes, so it's the first
+	// thing clampToHeight's truncation drops if the pre-clamp total runs
+	// long — which silently makes the width check below a no-op instead of
+	// a failure. " tokens:" is always present in statusBar()'s output, so
+	// its absence here means this test stopped checking what it claims to.
+	if !strings.Contains(out, " tokens:") {
+		t.Fatalf("status bar (\" tokens: ...\") not found anywhere in View() output — " +
+			"it was likely truncated away by clampToHeight; check the model's chrome " +
+			"setup (e.g. textarea height) against handleResize()'s assumptions")
+	}
 	for i, l := range lines {
 		if w := lipgloss.Width(l); w > m.width {
 			t.Errorf("line %d width = %d, want <= %d (m.width): %q", i, w, m.width, l)
@@ -96,6 +106,7 @@ func assertViewFitsWidth(t *testing.T, m Model) {
 func TestView_LongModelNameFitsWidth(t *testing.T) {
 	m := Model{width: 80, height: 24, historyIdx: -1, spinner: spinner.New()}
 	m.textarea = textarea.New()
+	m.textarea.SetHeight(3) // matches NewModel's real chrome setup
 	m = m.handleResize()
 	m.agentName = "TechLead"
 	m.modelName = "vllm-nemotron-elastic-30b-long-context-window-experimental"
@@ -111,9 +122,31 @@ func TestView_LongModelNameFitsWidth(t *testing.T) {
 func TestView_LongNoticeFitsWidth(t *testing.T) {
 	m := Model{width: 55, height: 24, historyIdx: -1, spinner: spinner.New()}
 	m.textarea = textarea.New()
+	m.textarea.SetHeight(3) // matches NewModel's real chrome setup
 	m = m.handleResize()
 	m.totalTokens = 123456789
 	m.notice = "copied reply 3/12 to clipboard"
+	m.blocks = []ContentBlock{{Type: BlockUser, Text: "hi"}}
+	m.updateViewport()
+
+	assertViewFitsWidth(t, m)
+}
+
+// TestView_HugeTokenCountFitsWidth is a regression for a gap the previous
+// two tests didn't cover: statusBar() clamped rightRaw (the notice/hint/
+// spinner text) to whatever room was left after leftRaw's width, but never
+// clamped leftRaw (" tokens: <N>") itself. On a narrow terminal with a
+// large enough totalTokens — plausible over a long real session, since
+// it's an unbounded running count — leftRaw alone can exceed m.width,
+// which zeroes the computed gap but leaves left+right wider than m.width:
+// the same physical-wrap-desyncs-the-alt-screen failure this whole file
+// exists to catch, just from the left side of the status bar.
+func TestView_HugeTokenCountFitsWidth(t *testing.T) {
+	m := Model{width: 20, height: 24, historyIdx: -1, spinner: spinner.New()}
+	m.textarea = textarea.New()
+	m.textarea.SetHeight(3) // matches NewModel's real chrome setup
+	m = m.handleResize()
+	m.totalTokens = 999999999999
 	m.blocks = []ContentBlock{{Type: BlockUser, Text: "hi"}}
 	m.updateViewport()
 
