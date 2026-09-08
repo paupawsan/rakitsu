@@ -2,6 +2,8 @@
 
 Thanks for your interest in contributing to **Rakitsu**.
 
+This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md). By participating you agree to uphold it.
+
 ## License
 
 Rakitsu is licensed under the [Business Source License 1.1](LICENSE). By contributing, you agree that your contributions will be licensed under the same terms. The license converts to Apache License, Version 2.0 four years after each version's first public release.
