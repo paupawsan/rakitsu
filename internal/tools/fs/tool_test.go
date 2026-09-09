@@ -505,3 +505,153 @@ func TestWrite_ExplicitWorkingDir_StillJoins(t *testing.T) {
 		t.Errorf("expected file under working_dir: %v", err)
 	}
 }
+
+// ============================================================
+// search — symlink escape
+// ============================================================
+
+func mustSymlink(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink not supported here: %v", err)
+	}
+}
+
+func searchFor(t *testing.T, tool *Tool, path, pattern string) string {
+	t.Helper()
+	out, err := tool.Execute(context.Background(), map[string]interface{}{
+		"path":    path,
+		"pattern": pattern,
+	})
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	return out
+}
+
+// A symlink inside the allowed directory that points at a file outside it
+// must not turn search into a content oracle for that outside file.
+func TestSearch_SymlinkToOutsideFile_NotMatched(t *testing.T) {
+	outside := t.TempDir()
+	allowed := t.TempDir()
+	outsideFile := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("marker-outside-483"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustSymlink(t, outsideFile, filepath.Join(allowed, "link.txt"))
+
+	tool := newFSTool("search", []string{allowed})
+	out := searchFor(t, tool, allowed, "marker-outside-483")
+	if !strings.Contains(out, "No files") {
+		t.Errorf("search followed a symlink out of allowed_paths: %q", out)
+	}
+}
+
+func TestSearch_SymlinkedDirOutside_NotDescended(t *testing.T) {
+	outside := t.TempDir()
+	allowed := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("marker-outside-dir-483"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustSymlink(t, outside, filepath.Join(allowed, "linkdir"))
+
+	tool := newFSTool("search", []string{allowed})
+	out := searchFor(t, tool, allowed, "marker-outside-dir-483")
+	if !strings.Contains(out, "No files") {
+		t.Errorf("search descended a symlinked directory out of allowed_paths: %q", out)
+	}
+}
+
+// A symlink that resolves inside the allowed directory is still fine.
+func TestSearch_SymlinkWithinAllowed_StillMatched(t *testing.T) {
+	allowed := t.TempDir()
+	target := filepath.Join(allowed, "real.txt")
+	if err := os.WriteFile(target, []byte("marker-inside-483"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustSymlink(t, target, filepath.Join(allowed, "link.txt"))
+
+	tool := newFSTool("search", []string{allowed})
+	out := searchFor(t, tool, allowed, "marker-inside-483")
+	if strings.Contains(out, "No files") || !strings.Contains(out, "real.txt") {
+		t.Errorf("in-bound symlink/target should still match, got %q", out)
+	}
+}
+
+// A search path that is itself a symlink to a directory inside the fence is
+// pinned by handle and matched against the directory reached through the
+// root, so it still searches (and reports under the path as requested).
+func TestSearch_SymlinkedBaseDirWithinAllowed_StillWorks(t *testing.T) {
+	allowed := t.TempDir()
+	real := filepath.Join(allowed, "real")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "hit.txt"), []byte("marker-base-link-483"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(allowed, "link")
+	mustSymlink(t, real, link)
+
+	tool := newFSTool("search", []string{allowed})
+	out := searchFor(t, tool, link, "marker-base-link-483")
+	if !strings.Contains(out, filepath.Join(link, "hit.txt")) {
+		t.Errorf("symlinked in-bound search path should still search, got %q", out)
+	}
+}
+
+// The search path may be a single file ("Directory or file to search" in
+// the example configs); it is matched through the root like any other.
+func TestSearch_SingleFilePath_StillWorks(t *testing.T) {
+	allowed := t.TempDir()
+	file := filepath.Join(allowed, "only.txt")
+	if err := os.WriteFile(file, []byte("marker-single-483"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := newFSTool("search", []string{allowed})
+	if out := searchFor(t, tool, file, "marker-single-483"); !strings.Contains(out, file) {
+		t.Errorf("single-file search should match the file itself, got %q", out)
+	}
+	if out := searchFor(t, tool, file, "absent-483"); !strings.Contains(out, "No files") {
+		t.Errorf("single-file search should report no match, got %q", out)
+	}
+}
+
+// Normal in-bound searches keep working, including a search rooted at a
+// subdirectory of the allowed path and results reported relative to it.
+func TestSearch_Subdirectory_StillFound(t *testing.T) {
+	allowed := t.TempDir()
+	sub := filepath.Join(allowed, "sub", "deeper")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "deep.txt"), []byte("needle-deep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(allowed, "top.txt"), []byte("needle-deep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := newFSTool("search", []string{allowed})
+	out := searchFor(t, tool, filepath.Join(allowed, "sub"), "needle-deep")
+	if !strings.Contains(out, filepath.Join(allowed, "sub", "deeper", "deep.txt")) {
+		t.Errorf("expected the nested file under the search root, got %q", out)
+	}
+	if strings.Contains(out, "top.txt") {
+		t.Errorf("search rooted at a subdirectory must not report files above it: %q", out)
+	}
+}
+
+func TestSearch_RelativeAllowedDot_StillWorks(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("needle-rel"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	tool := newFSTool("search", nil) // defaults to ["."]
+	out := searchFor(t, tool, ".", "needle-rel")
+	if strings.Contains(out, "No files") {
+		t.Errorf("relative allowed path search failed: %q", out)
+	}
+}
