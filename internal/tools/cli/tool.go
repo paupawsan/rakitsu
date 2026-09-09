@@ -452,22 +452,23 @@ func (t *Tool) isCommandAllowed(cmd string) bool {
 
 // executeLocalRestricted executes the command locally with restrictions
 func (t *Tool) executeLocalRestricted(ctx context.Context, cmd []string) (string, error) {
-	// Set environment variables
-	if t.sandbox != nil {
-		for _, path := range t.sandbox.AllowedPaths {
-			// Validate that any path arguments are within allowed paths
-			for _, arg := range cmd[1:] {
-				if strings.HasPrefix(arg, "/") || strings.HasPrefix(arg, "./") {
-					absArg, _ := filepath.Abs(arg)
-					absAllowed, _ := filepath.Abs(path)
-					if absArg != absAllowed && !strings.HasPrefix(absArg, absAllowed+string(filepath.Separator)) {
-						return "", &SecurityError{
-							Command: strings.Join(cmd, " "),
-							Reason:  fmt.Sprintf("path '%s' is not in allowed paths", arg),
-						}
-					}
-				}
-			}
+	// Working directory: explicit workingDir first, then sandbox allowed path.
+	dir := t.workingDir
+	if dir == "" && t.sandbox != nil && len(t.sandbox.AllowedPaths) > 0 {
+		dir = t.sandbox.AllowedPaths[0]
+	}
+	// A nonexistent Dir surfaces from os/exec as "fork/exec <binary>: no such
+	// file or directory", which reads as the binary being missing — check up
+	// front so the error names the real problem (paupawsan/rakitsu#28).
+	if dir != "" {
+		if _, statErr := os.Stat(dir); statErr != nil {
+			return "", fmt.Errorf("working directory %q for command execution is not usable: %w", dir, statErr)
+		}
+	}
+
+	if t.sandbox != nil && len(t.sandbox.AllowedPaths) > 0 {
+		if err := checkArgPaths(cmd, dir, t.sandbox.AllowedPaths); err != nil {
+			return "", err
 		}
 	}
 
@@ -482,21 +483,7 @@ func (t *Tool) executeLocalRestricted(ctx context.Context, cmd []string) (string
 
 	execCmd := exec.CommandContext(ctx, cmd[0], cmd[1:]...)
 	execCmd.Env = scrubbedEnviron()
-
-	// Set working directory: explicit workingDir first, then sandbox allowed path
-	if t.workingDir != "" {
-		execCmd.Dir = t.workingDir
-	} else if t.sandbox != nil && len(t.sandbox.AllowedPaths) > 0 {
-		execCmd.Dir = t.sandbox.AllowedPaths[0]
-	}
-	// A nonexistent Dir surfaces from os/exec as "fork/exec <binary>: no such
-	// file or directory", which reads as the binary being missing — check up
-	// front so the error names the real problem (paupawsan/rakitsu#28).
-	if execCmd.Dir != "" {
-		if _, statErr := os.Stat(execCmd.Dir); statErr != nil {
-			return "", fmt.Errorf("working directory %q for command execution is not usable: %w", execCmd.Dir, statErr)
-		}
-	}
+	execCmd.Dir = dir
 
 	// Run in its own process group so a timeout kills the whole tree, not
 	// just the direct child — matters for whitelisted shell wrappers
@@ -514,6 +501,135 @@ func (t *Tool) executeLocalRestricted(ctx context.Context, cmd []string) (string
 	}
 
 	return truncateOutput(string(output), t.maxOutputBytes()), nil
+}
+
+// checkArgPaths is the allowed_paths ARGUMENT filter for local_restricted
+// execution. It rejects any argument token naming a location outside every
+// allowed path once resolved the way the command will see it: relative to
+// dir (the directory the command runs in), `..` components cleaned, and
+// symlinks resolved. Shell-wrapped templates (sh -c '…') and
+// placeholder-substituted arguments can carry several tokens in one argv
+// element, so each element is split on whitespace; quote characters are
+// dropped the way the shell drops them (the adjacent fragments
+// "..", "/x" concatenate to ../x); `--opt=path` and `VAR=path` forms are
+// checked on their value; a `~`-prefixed token is expanded the way the
+// shell would; a token with glob metacharacters is expanded against the
+// working directory and every match is checked, since that is what the
+// shell hands the command. Every token is resolved, not just
+// those that look like paths: a token such as a flag or a git ref lands
+// inside the working directory and passes, while a bare name that is a
+// symlink out of the fence is caught.
+//
+// Trust model (docs/SECURITY.md): this is an argument filter, not
+// containment. It only sees paths that appear verbatim as tokens. An
+// allowed interpreter (python3, node, bash, …) opens whatever its code
+// names, a shell payload can build a path from variables or substitution,
+// and `find -exec`/`xargs` re-invoke commands the filter never sees.
+// Real containment is sandbox: docker.
+func checkArgPaths(cmd []string, dir string, allowed []string) error {
+	sep := string(filepath.Separator)
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	roots := make([]string, 0, len(allowed))
+	for _, a := range allowed {
+		absAllowed, err := filepath.Abs(a)
+		if err != nil {
+			continue
+		}
+		roots = append(roots, strings.TrimRight(resolveExistingPath(absAllowed), sep))
+	}
+	deny := func(tok, why string) error {
+		return &SecurityError{
+			Command: strings.Join(cmd, " "),
+			Reason:  fmt.Sprintf("path '%s' %s", tok, why),
+		}
+	}
+	dequote := strings.NewReplacer(`"`, "", `'`, "")
+	for _, arg := range cmd[1:] {
+		for _, tok := range strings.Fields(arg) {
+			tok = dequote.Replace(tok)
+			if i := strings.IndexByte(tok, '='); i > 0 && !strings.Contains(tok[:i], sep) {
+				tok = tok[i+1:] // --opt=path / VAR=path
+			}
+			if tok == "" {
+				continue
+			}
+			p := tok
+			if strings.HasPrefix(p, "~") {
+				if p != "~" && !strings.HasPrefix(p, "~/") {
+					return deny(tok, "uses another user's home directory") // ~user/…: cannot resolve safely
+				}
+				home, err := os.UserHomeDir()
+				if err != nil {
+					return deny(tok, "cannot be resolved")
+				}
+				p = home + p[1:]
+			}
+			if !filepath.IsAbs(p) {
+				p = filepath.Join(absDir, p)
+			}
+			p = filepath.Clean(p)
+			candidates := []string{p}
+			if strings.ContainsAny(p, "*?[") {
+				// The shell expands the glob before the command sees it; a
+				// match that is a symlink out of the fence must be caught the
+				// same as if it had been named directly. No match: the shell
+				// passes the literal token, checked as-is above.
+				if matches, err := filepath.Glob(p); err == nil && len(matches) > 0 {
+					candidates = matches
+				}
+			}
+			for _, c := range candidates {
+				if insideRoots(resolveExistingPath(c), roots, sep) {
+					continue
+				}
+				if c != p {
+					return deny(tok, fmt.Sprintf("expands to '%s', which is not in allowed paths", c))
+				}
+				return deny(tok, "is not in allowed paths")
+			}
+		}
+	}
+	return nil
+}
+
+// insideRoots reports whether real (an absolute, symlink-resolved path) is
+// one of roots or below one. The filesystem root trims to "", so its prefix
+// is sep alone and every absolute path is inside it.
+func insideRoots(real string, roots []string, sep string) bool {
+	for _, r := range roots {
+		if real == r || strings.HasPrefix(real, r+sep) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveExistingPath resolves symlinks for the deepest existing prefix of
+// absPath and re-appends the remaining components, so a not-yet-existing
+// target is still judged by where it would land. Mirrors
+// internal/tools/fs.resolvePathWithSymlinks; duplicated to keep this package
+// independent of the fs tool.
+func resolveExistingPath(absPath string) string {
+	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
+		return resolved
+	}
+	dir := absPath
+	var tail []string
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		tail = append([]string{filepath.Base(dir)}, tail...)
+		dir = parent
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(append([]string{resolved}, tail...)...)
+		}
+	}
+	return absPath
 }
 
 // maxOutputBytes returns the configured cap for this tool invocation, or

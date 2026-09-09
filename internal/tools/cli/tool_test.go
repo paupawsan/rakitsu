@@ -3,6 +3,9 @@ package cli
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -699,5 +702,197 @@ func TestExecute_MissingSandboxWorkdir_ClearError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "working directory") {
 		t.Errorf("error should name the working directory, got: %v", err)
+	}
+}
+
+// ============================================================
+// allowed_paths — argument path filter
+// ============================================================
+
+// allowedFixture returns an allowed directory containing inside.txt, whose
+// parent holds outside.txt (the file every escape below tries to reach).
+func allowedFixture(t *testing.T) (allowed string, outsideFile string) {
+	t.Helper()
+	parent := t.TempDir()
+	allowed = filepath.Join(parent, "allowed")
+	if err := os.MkdirAll(filepath.Join(allowed, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outsideFile = filepath.Join(parent, "outside.txt")
+	if err := os.WriteFile(outsideFile, []byte("marker-outside-483"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(allowed, "inside.txt"), []byte("marker-inside-483"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return allowed, outsideFile
+}
+
+var pathParam = map[string]config.Parameter{"path": {Type: "string", Required: true}}
+
+func catTool(cmd string, allowed string) *Tool {
+	return newTool(cmd, pathParam, []string{allowed})
+}
+
+func assertDenied(t *testing.T, tool *Tool, path string) {
+	t.Helper()
+	out, err := tool.Execute(context.Background(), map[string]interface{}{"path": path})
+	var se *SecurityError
+	if !errors.As(err, &se) {
+		t.Errorf("path %q: want *SecurityError, got err=%v out=%q", path, err, out)
+	}
+	if strings.Contains(out, "marker-outside-483") {
+		t.Errorf("path %q: outside content leaked: %q", path, out)
+	}
+}
+
+func assertAllowed(t *testing.T, tool *Tool, path, wantMarker string) {
+	t.Helper()
+	out, err := tool.Execute(context.Background(), map[string]interface{}{"path": path})
+	if err != nil {
+		t.Fatalf("path %q: unexpected error: %v", path, err)
+	}
+	if !strings.Contains(out, wantMarker) {
+		t.Errorf("path %q: want %q in output, got %q", path, wantMarker, out)
+	}
+}
+
+func TestExecute_AllowedPaths_ParentTraversalDenied(t *testing.T) {
+	allowed, _ := allowedFixture(t)
+	assertDenied(t, catTool("cat {{path}}", allowed), "../outside.txt")
+}
+
+func TestExecute_AllowedPaths_NestedTraversalDenied(t *testing.T) {
+	allowed, _ := allowedFixture(t)
+	assertDenied(t, catTool("cat {{path}}", allowed), "sub/../../outside.txt")
+}
+
+func TestExecute_AllowedPaths_AbsoluteOutsideDenied(t *testing.T) {
+	allowed, outside := allowedFixture(t)
+	assertDenied(t, catTool("cat {{path}}", allowed), outside)
+}
+
+// Relative arguments resolve against the directory the command actually
+// runs in (allowed_paths[0]), not the rakitsu process cwd — the old check
+// used filepath.Abs, which wrongly rejected "./inside.txt" whenever the
+// process cwd was elsewhere and never saw bare "inside.txt" at all.
+func TestExecute_AllowedPaths_RelativeResolvesAgainstSandboxDir(t *testing.T) {
+	allowed, _ := allowedFixture(t)
+	tool := catTool("cat {{path}}", allowed)
+	assertAllowed(t, tool, "inside.txt", "marker-inside-483")
+	assertAllowed(t, tool, "./inside.txt", "marker-inside-483")
+	assertAllowed(t, tool, "sub/../inside.txt", "marker-inside-483")
+}
+
+func TestExecute_AllowedPaths_SymlinkEscapeDenied(t *testing.T) {
+	allowed, outside := allowedFixture(t)
+	if err := os.Symlink(outside, filepath.Join(allowed, "link.txt")); err != nil {
+		t.Skipf("symlink not supported here: %v", err)
+	}
+	assertDenied(t, catTool("cat {{path}}", allowed), "link.txt")
+}
+
+// Shell-wrapped templates carry the whole payload as one argv element; the
+// filter tokenizes it so a traversal inside the payload is still caught.
+func TestExecute_AllowedPaths_ShellPayloadTraversalDenied(t *testing.T) {
+	allowed, _ := allowedFixture(t)
+	tool := catTool("sh -c 'cat {{path}}'", allowed)
+	assertDenied(t, tool, "../outside.txt")
+	assertAllowed(t, tool, "inside.txt", "marker-inside-483")
+}
+
+func TestExecute_AllowedPaths_ShellTildeExpansionDenied(t *testing.T) {
+	allowed, outside := allowedFixture(t)
+	t.Setenv("HOME", filepath.Dir(outside))
+	assertDenied(t, catTool("sh -c 'cat {{path}}'", allowed), "~/outside.txt")
+}
+
+// The shell expands a glob before the command sees it, so a match that is
+// a symlink out of the fence must be caught the same as if it had been
+// named directly. Globs over in-fence files still work.
+func TestExecute_AllowedPaths_ShellGlobExpandingToSymlinkEscapeDenied(t *testing.T) {
+	allowed, outside := allowedFixture(t)
+	if err := os.Symlink(outside, filepath.Join(allowed, "link.txt")); err != nil {
+		t.Skipf("symlink not supported here: %v", err)
+	}
+	tool := catTool("sh -c 'cat {{path}}'", allowed)
+	assertDenied(t, tool, "*")
+	assertDenied(t, tool, "*.txt")
+	assertAllowed(t, tool, "in*.txt", "marker-inside-483")
+}
+
+// The shell concatenates adjacent quoted fragments: the fragments ".." and
+// "/outside.txt" reach cat as ../outside.txt. Stripping only the outer
+// quotes would leave a harmless-looking component with embedded quotes.
+func TestExecute_AllowedPaths_ShellQuotedFragmentTraversalDenied(t *testing.T) {
+	allowed, _ := allowedFixture(t)
+	tool := catTool("sh -c 'cat {{path}}'", allowed)
+	assertDenied(t, tool, `'..''/outside.txt'`)
+	assertDenied(t, tool, `".."'/outside.txt'`)
+}
+
+// A not-yet-existing name under a symlinked directory is judged by where
+// the symlink points, so `touch linkdir/new` cannot land outside the fence.
+func TestExecute_AllowedPaths_SymlinkDirNonexistentChildDenied(t *testing.T) {
+	allowed, outside := allowedFixture(t)
+	if err := os.Symlink(filepath.Dir(outside), filepath.Join(allowed, "linkdir")); err != nil {
+		t.Skipf("symlink not supported here: %v", err)
+	}
+	assertDenied(t, catTool("cat {{path}}", allowed), "linkdir/does-not-exist-483.txt")
+}
+
+// allowed_paths: ["/"] means the whole filesystem; the root must not trim
+// to an empty prefix that no path matches.
+func TestExecute_AllowedPaths_FilesystemRootAllowsAll(t *testing.T) {
+	allowed, _ := allowedFixture(t)
+	assertAllowed(t, catTool("cat {{path}}", "/"), filepath.Join(allowed, "inside.txt"), "marker-inside-483")
+}
+
+// An explicit working_dir inside allowed_paths is what relative arguments
+// resolve against; "../inside.txt" from allowed/sub lands inside the fence.
+func TestExecute_AllowedPaths_ExplicitWorkingDir(t *testing.T) {
+	allowed, _ := allowedFixture(t)
+	def := &config.ToolDefinition{
+		Name:       "test-tool",
+		Command:    "cat {{path}}",
+		Parameters: pathParam,
+		WorkingDir: filepath.Join(allowed, "sub"),
+		Sandbox:    &config.SandboxConfig{Type: "local_restricted", AllowedPaths: []string{allowed}},
+	}
+	tool := NewTool(def)
+	assertAllowed(t, tool, "../inside.txt", "marker-inside-483")
+	assertDenied(t, tool, "../../outside.txt")
+}
+
+func TestExecute_NoAllowedPaths_NoPathFilter(t *testing.T) {
+	tool := newTool("cat {{path}}", pathParam)
+	_, err := tool.Execute(context.Background(), map[string]interface{}{"path": "../definitely-missing-483.txt"})
+	var se *SecurityError
+	if errors.As(err, &se) {
+		t.Errorf("without allowed_paths there is no path filter, got %v", err)
+	}
+}
+
+// Documents the trust boundary rather than a bug: allowed_paths is an
+// ARGUMENT filter. An allowed interpreter opens whatever its code names, so
+// the filter cannot contain it — real containment needs sandbox: docker
+// (docs/SECURITY.md). If this test ever starts failing because the read is
+// blocked, the docs and this comment must change together.
+func TestExecute_AllowedPaths_IsArgumentFilterNotContainment(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+	allowed, _ := allowedFixture(t)
+	def := &config.ToolDefinition{
+		Name:       "test-tool",
+		Command:    "python3 -c {{code}}",
+		Parameters: map[string]config.Parameter{"code": {Type: "string", Required: true}},
+		Sandbox:    &config.SandboxConfig{Type: "local_restricted", AllowedPaths: []string{allowed}},
+	}
+	out, err := NewTool(def).Execute(context.Background(), map[string]interface{}{
+		"code": "print(open('../outside.txt').read())",
+	})
+	if err != nil || !strings.Contains(out, "marker-outside-483") {
+		t.Fatalf("expected the interpreter to read past the argument filter (documented limitation); err=%v out=%q", err, out)
 	}
 }
