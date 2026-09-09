@@ -55,6 +55,8 @@ func TestRequireBindAllowed(t *testing.T) {
 }
 
 func TestRequiresAuth(t *testing.T) {
+	// Default-deny: everything under the API, stream, and protocol prefixes
+	// is control plane unless it is an explicit public exception below.
 	protected := []struct {
 		method, path string
 	}{
@@ -85,6 +87,37 @@ func TestRequiresAuth(t *testing.T) {
 		{"POST", "/a2a"},                     // same shape as MCP: full tool-execution surface
 		{"GET", "/api/providers/models"},     // outbound-request proxy, SSRF-adjacent
 		{"GET", "/api/providers/model-info"}, // same endpoint shape as above
+		// Persisted-session history: discloses queries,
+		// outputs and configs; deletes history; rerun starts a run.
+		{"GET", "/api/sessions"},
+		{"DELETE", "/api/sessions"},
+		{"GET", "/api/sessions/abc123"},
+		{"DELETE", "/api/sessions/abc123"},
+		{"GET", "/api/sessions/abc123/events"},
+		{"GET", "/api/sessions/abc123/config"},
+		{"POST", "/api/sessions/abc123/rerun"},
+		// Uploaded configs may embed provider API keys.
+		{"GET", "/api/configs"},
+		{"GET", "/api/configs/abc123"},
+		// Live event stream and live session metadata disclose the query
+		// and every agent output.
+		{"GET", "/events"},
+		{"GET", "/api/session"},
+		// CLI<->hub reporting: mutation surface (register/ingest/deregister
+		// spoof or inject sessions and events; commands discloses debug
+		// commands). The forwarder now sends the token when configured.
+		{"POST", "/api/hub/register"},
+		{"POST", "/api/hub/deregister"},
+		{"POST", "/api/hub/ingest"},
+		{"GET", "/api/hub/commands"},
+		{"POST", "/api/hub/message-result"},
+		// Registers a demo config / parses arbitrary YAML.
+		{"GET", "/api/demo"},
+		{"POST", "/api/configs/validate"},
+		{"POST", "/api/tokenize"},
+		// Anything new under the prefixes is gated without a code change.
+		{"GET", "/api/some/future/endpoint"},
+		{"GET", "/ws/some/future/socket"},
 	}
 	for _, c := range protected {
 		r := httptest.NewRequest(c.method, c.path, nil)
@@ -97,17 +130,18 @@ func TestRequiresAuth(t *testing.T) {
 		method, path string
 	}{
 		{"GET", "/"},
+		{"GET", "/index.html"},
+		{"GET", "/assets/index-abc123.js"},
 		{"GET", "/health"},
 		{"GET", "/api/status"},
-		{"GET", "/api/sessions"},
-		{"GET", "/api/configs"},
-		{"GET", "/events"},
-		{"GET", "/api/configs/abc123"},      // read of a config is not gated
-		{"POST", "/api/hub/register"},       // CLI-report endpoints: the hub forwarder
-		{"POST", "/api/hub/deregister"},     // sends no Authorization header at all, so
-		{"POST", "/api/hub/ingest"},         // gating these would break CLI<->hub
-		{"GET", "/api/hub/commands"},        // reporting whenever a token is set. Only
-		{"POST", "/api/hub/message-result"}, // the UI-facing hub endpoints are gated.
+		// A2A discovery: the spec expects the card to be fetchable so a
+		// client can learn what auth is required (the card advertises it).
+		{"GET", "/.well-known/agent-card.json"},
+		// Cross-session messaging carries its own gate (sessionMsgAuthorized)
+		// that also accepts RAKITSU_SESSION_MSG_TOKEN; gating it here would
+		// lock out clients holding only that token.
+		{"POST", "/api/sessions/abc123/message"},
+		{"GET", "/api/sessions/abc123/inbox"},
 	}
 	for _, c := range open {
 		r := httptest.NewRequest(c.method, c.path, nil)
