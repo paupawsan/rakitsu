@@ -273,3 +273,26 @@ func TestListModels(t *testing.T) {
 		t.Fatalf("slugs = %v", slugs)
 	}
 }
+
+// SSE permits CRLF line endings. bufio.Scanner's default ScanLines split
+// already strips an optional \r before \n (see its doc comment), so no
+// special handling is needed here — this test pins that behavior so a
+// future change to the scanner's split function can't silently break it.
+func TestProvider_CRLFFramedStream(t *testing.T) {
+	p, _ := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		body := strings.ReplaceAll(sse(
+			`{"type":"response.output_text.delta","delta":"Hel"}`,
+			`{"type":"response.output_text.delta","delta":"lo"}`,
+			`{"type":"response.output_item.done","item":{"type":"function_call","call_id":"c1","name":"echo","arguments":"{}"}}`,
+			completed,
+		), "\n", "\r\n")
+		fmt.Fprint(w, body)
+	})
+	res, err := p.Generate(context.Background(), "", []llm.Message{llm.NewTextMessage("user", "go")}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Response != "Hello" || len(res.ToolCalls) != 1 || res.TokenUsage == nil || res.TokenUsage.TotalTokens != 15 {
+		t.Fatalf("CRLF stream parsed wrong: %+v", res)
+	}
+}
