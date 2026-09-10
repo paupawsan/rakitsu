@@ -61,6 +61,7 @@ var quickstartProviders = []quickstartProvider{
 	{name: "Google Gemini", id: "gemini", envVar: "GEMINI_API_KEY", needKey: true},
 	{name: "Ollama (local)", id: "ollama"},
 	{name: "LiteLLM (proxy)", id: "litellm", envVar: "LITELLM_API_KEY", needKey: true, baseURLEnvVar: "LITELLM_BASE_URL", needBaseURL: true},
+	{name: "Codex (ChatGPT subscription, needs `codex login`)", id: "codex"},
 }
 
 func runQuickstart(cmd *cobra.Command, args []string) error {
@@ -213,10 +214,7 @@ func runQuickstart(cmd *cobra.Command, args []string) error {
 	if !ok {
 		return fmt.Errorf("unknown template: %s", tmpl.id)
 	}
-	model := scaffold.ProviderDefaults[prov.id]
-	if model == "" {
-		model = "gpt-4o-mini"
-	}
+	model := scaffold.DefaultModel(prov.id)
 	data := scaffold.TemplateData{
 		Provider:   prov.id,
 		Model:      model,

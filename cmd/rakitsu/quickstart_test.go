@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/paupawsan/rakitsu/internal/scaffold"
 	"github.com/spf13/cobra"
 )
 
@@ -222,6 +223,22 @@ func TestRunQuickstart_LiteLLM_DetectsKeyAndBaseURLWhenSet(t *testing.T) {
 	err := runQuickstartWithInput(t, "\n5\n\n\nn\n")
 	if err != nil {
 		t.Fatalf("runQuickstart returned an error: %v", err)
+	}
+}
+
+// Codex needs neither key nor base_url, so the wizard must not prompt for
+// them, and the generated config must leave the model to ~/.codex/config.toml.
+func TestRunQuickstart_Codex_NoKeyPromptAndNoModel(t *testing.T) {
+	// template(blank) provider(6=codex) dir(blank) structure(blank) start-web-ui(n)
+	err := runQuickstartWithInput(t, "\n6\n\n\nn\n")
+	if err != nil {
+		t.Fatalf("runQuickstart returned an error: %v", err)
+	}
+	if scaffold.DefaultModel("codex") != "" {
+		t.Fatalf("codex must not get a hardcoded default model")
+	}
+	if scaffold.APIKeyEnvVar("codex") != "" {
+		t.Fatalf("codex must not get an API key env var")
 	}
 }
 

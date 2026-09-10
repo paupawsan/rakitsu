@@ -1,0 +1,22 @@
+# Provider Reference: Codex (ChatGPT subscription)
+#
+# No API key. Rakitsu reuses the login Codex CLI stored in ~/.codex/auth.json
+# (run `codex login` once) and refreshes it when it expires. This is your own
+# ChatGPT account; OpenAI's terms for that account apply.
+name: Codex Example
+version: "1.0"
+
+settings:
+  default_provider: codex
+  providers:
+    codex:
+      type: codex
+      # default_model: gpt-6-astra          # optional; defaults to `model` in ~/.codex/config.toml
+      # credentials_file: ~/.codex/auth.json # optional; this is the default
+  defaults:
+    max_tokens: 2048   # not sent to the Codex backend; kept for other providers in mixed configs
+
+agents:
+  - name: Assistant
+    role: worker
+    system_prompt: You are a helpful assistant.

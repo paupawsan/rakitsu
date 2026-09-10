@@ -9,6 +9,7 @@ One file per provider showing the correct configuration format. Copy into your p
 | `openai.yaml` | OpenAI | Direct API access |
 | `anthropic.yaml` | Anthropic | Claude models |
 | `gemini.yaml` | Google Gemini | Gemini models |
+| `codex.yaml` | Codex (ChatGPT subscription) | No API key; reuses the login from `codex login` (`~/.codex/auth.json`) |
 | `ollama.yaml` | Ollama | Local models, no API key needed |
 | `litellm.yaml` | LiteLLM | Proxy to any provider via `base_url` |
 | `nvidia.yaml` | NVIDIA NIM | OpenAI-compatible, free tier via build.nvidia.com (DeepSeek, Llama, Nemotron) |
@@ -35,3 +36,5 @@ api_key: ${NVIDIA_API_KEY}
 ```
 
 Ollama and LiteLLM don't require API keys when running locally.
+
+The `codex` provider takes no key at all: it reads the ChatGPT login that Codex CLI stored and refreshes it as needed. It is your own subscription and OpenAI's terms for that account apply.
