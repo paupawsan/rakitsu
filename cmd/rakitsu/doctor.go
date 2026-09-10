@@ -11,9 +11,10 @@
 //     are set, unset, or empty)
 //
 // Exit codes:
-//   0   all checks passed
-//   1   one or more warnings (config will likely run but with degraded behavior)
-//   2   one or more errors (config will likely fail to run)
+//
+//	0   all checks passed
+//	1   one or more warnings (config will likely run but with degraded behavior)
+//	2   one or more errors (config will likely fail to run)
 //
 // Out of scope for MVP (queued as follow-ups):
 //   - Effective-config layer dump (top-N knobs × 5 layers)
@@ -39,6 +40,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/paupawsan/rakitsu/internal/config"
+	"github.com/paupawsan/rakitsu/internal/llm"
+	codexProvider "github.com/paupawsan/rakitsu/internal/llm/codex"
 )
 
 // Severity controls the symbol in front of each report line and contributes
@@ -54,9 +57,9 @@ const (
 
 type finding struct {
 	sev   severity
-	label string  // short tag, e.g. "Provider reachability"
-	subj  string  // subject, e.g. "litellm"
-	msg   string  // free-form explanation; may include `→ suggestion`
+	label string // short tag, e.g. "Provider reachability"
+	subj  string // subject, e.g. "litellm"
+	msg   string // free-form explanation; may include `→ suggestion`
 }
 
 func (f finding) String() string {
@@ -284,6 +287,14 @@ func checkProviderReachability(ctx context.Context, cfg *config.Config) reachabi
 		// nvidia-via-openai). Native Anthropic + Gemini use different model-
 		// list shapes; deferred to a follow-up.
 		ptype := strings.ToLower(p.Type)
+		if ptype == "codex" {
+			f, slugs := checkCodex(ctx, name, p)
+			res.findings = append(res.findings, f...)
+			if len(slugs) > 0 {
+				res.catalogs[name] = slugs
+			}
+			continue
+		}
 		if ptype != "openai" && ptype != "litellm" && ptype != "ollama" && ptype != "" {
 			res.findings = append(res.findings, finding{
 				sev:   sevInfo,
@@ -573,4 +584,51 @@ func exitCodeFor(findings []finding) int {
 	default:
 		return 0
 	}
+}
+
+// checkCodex verifies the codex provider end to end: the Codex CLI login
+// file exists, the subscription backend answers with a model catalog (which
+// also proves the token is valid or refreshable), and the model the
+// provider will actually use is in that catalog. Returns the catalog slugs
+// so the per-agent model check can use them too.
+func checkCodex(ctx context.Context, name string, p config.ProviderDefinition) ([]finding, []string) {
+	path := p.CredentialsFile
+	if path == "" {
+		path = codexProvider.DefaultAuthFile
+	}
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			path = filepath.Join(home, path[2:])
+		}
+	}
+	if _, err := os.Stat(path); err != nil {
+		return []finding{{sev: sevErr, label: "Codex login", subj: name, msg: fmt.Sprintf("%s not found — run \"codex login\" first", path)}}, nil
+	}
+	out := []finding{{sev: sevOK, label: "Codex login", subj: name, msg: "auth file present at " + path}}
+
+	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	models, err := codexProvider.ListModels(probeCtx, &llm.ProviderConfig{CredentialsFile: p.CredentialsFile, BaseURL: p.BaseURL})
+	if err != nil {
+		out = append(out, finding{sev: sevErr, label: "Codex catalog", subj: name, msg: err.Error()})
+		return out, nil
+	}
+	slugs := codexProvider.ListedSlugs(models)
+	out = append(out, finding{sev: sevOK, label: "Codex catalog", subj: name, msg: fmt.Sprintf("%d models available: %s", len(slugs), strings.Join(slugs, ", "))})
+
+	model := p.DefaultModel
+	source := "default_model"
+	if model == "" {
+		model = codexProvider.ConfigTomlModel(path)
+		source = "~/.codex/config.toml"
+	}
+	switch {
+	case model == "":
+		out = append(out, finding{sev: sevWarn, label: "Codex model", subj: name, msg: "no model: set default_model on the provider or `model` in ~/.codex/config.toml"})
+	case containsCaseInsensitive(slugs, model):
+		out = append(out, finding{sev: sevOK, label: "Codex model", subj: name, msg: fmt.Sprintf("%q (from %s) is in the catalog", model, source)})
+	default:
+		out = append(out, finding{sev: sevErr, label: "Codex model", subj: name, msg: fmt.Sprintf("%q (from %s) is not in the catalog", model, source)})
+	}
+	return out, slugs
 }

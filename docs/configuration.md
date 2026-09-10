@@ -191,7 +191,7 @@ settings:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `default_provider` | string | Default LLM provider: `openai`, `anthropic`, `gemini`, `ollama` |
+| `default_provider` | string | Default LLM provider: `openai`, `anthropic`, `gemini`, `codex`, `ollama` |
 | `api_keys` | map[string]string | Provider API keys (supports `${ENV_VAR}`) |
 | `base_urls` | map[string]string | Custom endpoint URLs per provider |
 | `credentials_files` | map[string]string | Service account JSON paths per provider |
@@ -220,10 +220,10 @@ settings:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `type` | string | Provider type: `openai`, `anthropic`, `gemini`, `ollama` |
-| `api_key` | string | API key (supports `${ENV_VAR}`) |
+| `type` | string | Provider type: `openai`, `anthropic`, `gemini`, `codex`, `ollama` |
+| `api_key` | string | API key (supports `${ENV_VAR}`); not used by `codex` |
 | `base_url` | string | Custom endpoint URL |
-| `credentials_file` | string | Service account JSON path |
+| `credentials_file` | string | Service account JSON path (Gemini) or `auth.json` path (`codex`, default `~/.codex/auth.json`) |
 | `location` | string | Cloud region (Vertex AI) |
 | `project` | string | Cloud project ID (Vertex AI) |
 

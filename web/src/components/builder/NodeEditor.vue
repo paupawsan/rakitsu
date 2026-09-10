@@ -391,16 +391,22 @@ const providerModels: Record<string, string[]> = {
 const discoveredModels = ref<string[]>([]);
 const modelDiscoveryLoading = ref(false);
 
+function isCodex(provider: string): boolean {
+  return props.providerMap[provider]?.type === 'codex';
+}
+
 async function discoverModels(provider: string) {
   const baseUrl = props.baseUrls[provider] ?? '';
-  if (!baseUrl) {
+  if (!baseUrl && !isCodex(provider)) {
     discoveredModels.value = [];
     return;
   }
   modelDiscoveryLoading.value = true;
   try {
     const apiKey = props.apiKeys[provider] ?? '';
-    const params = new URLSearchParams({ base_url: baseUrl });
+    const params = isCodex(provider)
+      ? new URLSearchParams({ type: 'codex', credentials_file: props.providerMap[provider]?.credentials_file ?? '' })
+      : new URLSearchParams({ base_url: baseUrl });
     const headers: HeadersInit = {};
     if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
     const res = await fetch(`/api/providers/models?${params}`, { headers });
@@ -559,7 +565,7 @@ function getModelsForProvider(provider: string): string[] {
 // If provider has a base_url, show ONLY discovered models (no static fallback)
 const hasBaseUrl = computed(() => {
   const provider = activeProvider.value ?? '';
-  return !!(props.baseUrls[provider]);
+  return !!(props.baseUrls[provider]) || isCodex(provider);
 });
 
 const agentModels = computed(() => {
@@ -1086,7 +1092,7 @@ function fmtDuration(ms?: number): string {
             placeholder="Select or type model"
             :loading="modelDiscoveryLoading"
             loading-text="Discovering models..."
-            :hint="discoveredModels.length > 0 ? `${discoveredModels.length} models from proxy` : ''"
+            :hint="discoveredModels.length > 0 ? `${discoveredModels.length} models discovered` : ''"
             :hint-class="discoveredModels.length > 0 ? 'discovered' : ''"
             @update:model-value="agentData.model = $event; handleFieldOverride('model', $event)"
           />
@@ -1712,7 +1718,7 @@ function fmtDuration(ms?: number): string {
             placeholder="Select or type model"
             :loading="modelDiscoveryLoading"
             loading-text="Discovering models..."
-            :hint="discoveredModels.length > 0 ? `${discoveredModels.length} models from proxy` : ''"
+            :hint="discoveredModels.length > 0 ? `${discoveredModels.length} models discovered` : ''"
             :hint-class="discoveredModels.length > 0 ? 'discovered' : ''"
             @update:model-value="orchestratorData.model = $event; handleFieldOverride('model', $event)"
           />

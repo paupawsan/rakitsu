@@ -31,6 +31,9 @@ var ProviderDefaults = map[string]string{
 	// universal default model name, so this is a placeholder the user is
 	// expected to replace (same convention as test/configs/litellm-dev-team).
 	"litellm": "your-model-alias",
+	// Codex reads the model from ~/.codex/config.toml when none is set; a
+	// hardcoded OpenAI model would be rejected by the subscription backend.
+	"codex": "",
 }
 
 // APIKeyEnvVar returns the canonical env var name for a provider's API key.
@@ -40,7 +43,7 @@ func APIKeyEnvVar(provider string) string {
 		return "ANTHROPIC_API_KEY"
 	case "gemini":
 		return "GEMINI_API_KEY"
-	case "ollama":
+	case "ollama", "codex":
 		return "" // no API key needed
 	case "litellm":
 		return "LITELLM_API_KEY"

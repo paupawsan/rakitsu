@@ -16,8 +16,11 @@ import (
 	"sync"
 	"time"
 
+	"context"
 	"github.com/paupawsan/rakitsu/internal/config"
 	"github.com/paupawsan/rakitsu/internal/debug"
+	"github.com/paupawsan/rakitsu/internal/llm"
+	codexProvider "github.com/paupawsan/rakitsu/internal/llm/codex"
 	"github.com/paupawsan/rakitsu/internal/session"
 	"github.com/paupawsan/rakitsu/internal/store"
 	"github.com/paupawsan/rakitsu/internal/telemetry"
@@ -1064,6 +1067,24 @@ func (s *SSEServer) handleProviderModels(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != http.MethodGet {
 		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	// The codex provider has no OpenAI-style endpoint; its catalog comes from
+	// the subscription backend using the local Codex CLI login.
+	if r.URL.Query().Get("type") == "codex" {
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
+		models, err := codexProvider.ListModels(ctx, &llm.ProviderConfig{CredentialsFile: r.URL.Query().Get("credentials_file")})
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"models": []string{}, "error": err.Error()})
+			return
+		}
+		slugs := codexProvider.ListedSlugs(models)
+		if slugs == nil {
+			slugs = []string{}
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{"models": slugs})
 		return
 	}
 

@@ -20,6 +20,7 @@ import (
 	"github.com/paupawsan/rakitsu/internal/debug"
 	"github.com/paupawsan/rakitsu/internal/llm"
 	anthropicProvider "github.com/paupawsan/rakitsu/internal/llm/anthropic"
+	codexProvider "github.com/paupawsan/rakitsu/internal/llm/codex"
 	geminiProvider "github.com/paupawsan/rakitsu/internal/llm/gemini"
 	openaiProvider "github.com/paupawsan/rakitsu/internal/llm/openai"
 	"github.com/paupawsan/rakitsu/internal/server"
@@ -1143,12 +1144,15 @@ func createLLMProvider(ctx context.Context, cfg *config.Config, providerName, mo
 	if model == "" {
 		model = cfg.Settings.Defaults.Model
 	}
-	if model == "" {
-		model = "gpt-4o-mini"
-	}
 
 	// Resolve the underlying provider type (e.g., "litellm-fast" → "openai")
 	providerType := strings.ToLower(cfg.GetProviderType(providerName))
+
+	// The codex provider reads its model from ~/.codex/config.toml when none
+	// is configured; the OpenAI-flavoured fallback would be rejected there.
+	if model == "" && providerType != "codex" {
+		model = "gpt-4o-mini"
+	}
 
 	pc := &llm.ProviderConfig{
 		APIKey:          cfg.GetAPIKey(providerName),
@@ -1196,8 +1200,8 @@ func createLLMProvider(ctx context.Context, cfg *config.Config, providerName, mo
 		pc.APIKey = "not-needed" // placeholder for OpenAI client
 	}
 
-	// Validate API key (except for ollama, gemini, and litellm)
-	if providerType != "ollama" && providerType != "gemini" && providerType != "litellm" && pc.APIKey == "" {
+	// Validate API key (except for ollama, gemini, litellm, and codex — codex uses the ChatGPT login)
+	if providerType != "ollama" && providerType != "gemini" && providerType != "litellm" && providerType != "codex" && pc.APIKey == "" {
 		envVar := strings.ToUpper(providerName) + "_API_KEY"
 		return nil, fmt.Errorf("%s API key not set — export %s or add api_key to settings.providers.%s", providerName, envVar, providerName)
 	}
@@ -1220,8 +1224,10 @@ func createLLMProvider(ctx context.Context, cfg *config.Config, providerName, mo
 		return anthropicProvider.NewProvider(pc), nil
 	case "gemini":
 		return geminiProvider.NewProvider(ctx, pc)
+	case "codex":
+		return codexProvider.NewProvider(pc)
 	default:
-		return nil, fmt.Errorf("unknown provider type %q for %q — supported: openai, anthropic, gemini, ollama, litellm", providerType, providerName)
+		return nil, fmt.Errorf("unknown provider type %q for %q — supported: openai, anthropic, gemini, codex, ollama, litellm", providerType, providerName)
 	}
 }
 

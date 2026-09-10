@@ -69,11 +69,13 @@ function saveProviderToLibrary(name: string, def: ProviderDefinition) {
   };
   if (idx >= 0) { saved[idx] = entry; } else { saved.push(entry); }
   localStorage.setItem(SAVED_PROVIDERS_KEY, JSON.stringify(saved));
+  savedProviderList.value = saved;
 }
 
 function removeSavedProvider(id: string) {
   const saved = getSavedProviders().filter(s => s._id !== id);
   localStorage.setItem(SAVED_PROVIDERS_KEY, JSON.stringify(saved));
+  savedProviderList.value = saved;
 }
 
 function importSavedProvider(sp: SavedProvider) {
@@ -82,7 +84,10 @@ function importSavedProvider(sp: SavedProvider) {
   showSavedProviders.value = false;
 }
 
-const savedProviderList = computed(() => getSavedProviders());
+// localStorage is not reactive, so this is a ref that save/remove refresh
+// explicitly; a computed over getSavedProviders() only ever ran once per
+// page load and the list looked stale until a refresh.
+const savedProviderList = ref<SavedProvider[]>(getSavedProviders());
 
 // Allowed Commands
 const allowedCommandsString = computed({
@@ -105,7 +110,12 @@ const providerTypes = [
   { value: 'gemini', label: 'Google Gemini' },
   { value: 'ollama', label: 'Ollama (Local)' },
   { value: 'litellm', label: 'LiteLLM (Proxy)' },
+  { value: 'codex', label: 'Codex (ChatGPT subscription)' },
 ];
+
+function isCodexProvider(providerName: string): boolean {
+  return (localSettings.value.providers?.[providerName] as ProviderDefinition | undefined)?.type === 'codex';
+}
 
 const providerEntries = computed({
   get: (): ProviderEntry[] => {
@@ -256,8 +266,8 @@ const defaultModelOptions = computed(() => {
   const provider = localSettings.value.default_provider;
   const baseUrl = getProviderBaseUrl(provider);
 
-  // If provider has a base_url, show ONLY discovered models
-  if (baseUrl) return discoveredModels.value;
+  // If provider has a base_url (or is codex), show ONLY discovered models
+  if (baseUrl || isCodexProvider(provider)) return discoveredModels.value;
 
   // No base_url — use static list based on provider type
   const provDef = localSettings.value.providers?.[provider] as ProviderDefinition | undefined;
@@ -276,16 +286,20 @@ async function discoverModels() {
   if (!provider) { discoveredModels.value = []; return; }
   const baseUrl = getProviderBaseUrl(provider);
   const apiKey = getProviderApiKey(provider);
-  if (!baseUrl) { discoveredModels.value = []; return; }
+  const codex = isCodexProvider(provider);
+  if (!baseUrl && !codex) { discoveredModels.value = []; return; }
 
   modelDiscoveryLoading.value = true;
   try {
-    const params = new URLSearchParams({ base_url: baseUrl });
+    const params = codex
+      ? new URLSearchParams({ type: 'codex', credentials_file: (localSettings.value.providers?.[provider] as ProviderDefinition | undefined)?.credentials_file ?? '' })
+      : new URLSearchParams({ base_url: baseUrl });
     const headers: HeadersInit = {};
     if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
     const [modelsRes, infoRes] = await Promise.allSettled([
       fetch(`/api/providers/models?${params}`, { headers }),
-      fetch(`/api/providers/model-info?${params}`, { headers }),
+      // Codex has no model-info endpoint; skip it instead of 404-ing.
+      codex ? Promise.reject(new Error('n/a')) : fetch(`/api/providers/model-info?${params}`, { headers }),
     ]);
 
     if (modelsRes.status === 'fulfilled' && modelsRes.value.ok) {
@@ -339,8 +353,8 @@ function getProviderModels(providerName: string): string[] {
   const provDef = localSettings.value.providers?.[providerName] as ProviderDefinition | undefined;
   const baseUrl = getProviderBaseUrl(providerName);
 
-  // If provider has a base_url, trigger discovery (don't show static)
-  if (baseUrl && !providerDiscoveryPending.has(providerName)) {
+  // Codex has no base_url; its catalog comes from the local Codex CLI login.
+  if ((baseUrl || provDef?.type === 'codex') && !providerDiscoveryPending.has(providerName)) {
     providerDiscoveryPending.add(providerName);
     discoverProviderModels(providerName).finally(() => providerDiscoveryPending.delete(providerName));
     return []; // Will populate after discovery completes
@@ -361,9 +375,12 @@ function getProviderModels(providerName: string): string[] {
 async function discoverProviderModels(providerName: string) {
   const baseUrl = getProviderBaseUrl(providerName);
   const apiKey = getProviderApiKey(providerName);
-  if (!baseUrl) { delete providerModelsCache.value[providerName]; return; }
+  const codex = isCodexProvider(providerName);
+  if (!baseUrl && !codex) { delete providerModelsCache.value[providerName]; return; }
   try {
-    const params = new URLSearchParams({ base_url: baseUrl });
+    const params = codex
+      ? new URLSearchParams({ type: 'codex', credentials_file: (localSettings.value.providers?.[providerName] as ProviderDefinition | undefined)?.credentials_file ?? '' })
+      : new URLSearchParams({ base_url: baseUrl });
     const headers: HeadersInit = {};
     if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
     const res = await fetch(`/api/providers/models?${params}`, { headers });
@@ -379,7 +396,7 @@ async function discoverAllProviderModels() {
   const providers = localSettings.value.providers || {};
   const promises: Promise<void>[] = [];
   for (const name of Object.keys(providers)) {
-    if (getProviderBaseUrl(name)) promises.push(discoverProviderModels(name));
+    if (getProviderBaseUrl(name) || isCodexProvider(name)) promises.push(discoverProviderModels(name));
   }
   await Promise.allSettled(promises);
 }
@@ -601,6 +618,10 @@ watch(() => props.settings, (newSettings) => {
             {{ getProviderModels(entry.name).length }} models discovered
           </span>
         </div>
+        <div v-if="entry.def.type === 'codex'" class="form-group">
+          <span class="hint">Uses your Codex CLI login (~/.codex/auth.json, run <code>codex login</code> once). Leave the model empty to use the one in ~/.codex/config.toml.</span>
+        </div>
+        <template v-else>
         <div class="form-group">
           <label>API Key</label>
           <input
@@ -648,6 +669,7 @@ watch(() => props.settings, (newSettings) => {
             />
           </div>
         </div>
+        </template>
         <div class="provider-actions">
           <button
             class="btn btn-apply-all"
@@ -711,7 +733,7 @@ watch(() => props.settings, (newSettings) => {
 
         <!-- 3. Default Model (auto-discovers from default provider) -->
         <div class="form-group">
-          <label>Default Model <span v-if="modelDiscoveryLoading" class="hint">discovering...</span><span v-else-if="discoveredModels.length > 0" class="hint discovered">{{ discoveredModels.length }} from proxy</span></label>
+          <label>Default Model <span v-if="modelDiscoveryLoading" class="hint">discovering...</span><span v-else-if="discoveredModels.length > 0" class="hint discovered">{{ discoveredModels.length }} discovered</span></label>
           <ComboBox
             :model-value="localSettings.defaults.model"
             :options="defaultModelOptions"
