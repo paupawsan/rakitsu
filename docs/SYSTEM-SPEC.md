@@ -1219,8 +1219,9 @@ rakitsu supports rather than hardcoded, and `Origin` is checked as a
 DNS-rebinding guard (403 on a disallowed origin). The **modern MCP era**
 (2026-07-28 revision) is not yet implemented. `RAKITSU_API_TOKEN` gates
 `/mcp` and `/a2a` on the main `serve` port; the standalone `--mcp-port`
-listener has a known gap where non-`/mcp` paths on that listener bypass the
-token check — a known limitation, not yet fixed.
+listener mounts the MCP server at `/mcp` only (`server.MCPListenerHandler`),
+so every other path on that listener is a 404 and the token gate cannot be
+sidestepped by path.
 
 ### MCP client — tool type `mcp_server`
 

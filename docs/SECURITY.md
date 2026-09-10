@@ -39,6 +39,32 @@ bypassable — the source says so explicitly.
 scripts you trust. Do not rely on the allowlist to make a config from an
 untrusted source safe.
 
+### `allowed_paths` on cli tools is an argument filter, not containment
+
+`sandbox.allowed_paths` on a `cli` tool makes rakitsu refuse a command whose
+**arguments** name a location outside the listed directories. Every
+whitespace-separated token of every argument — including the payload of a
+`sh -c '…'` template and `--opt=path` / `VAR=path` values — is resolved the
+way the command will see it: relative to the directory the command runs in,
+with `..` cleaned, symlinks resolved, and `~/` expanded. `cat ../secret`,
+`cat /etc/passwd`, `cat link-to-outside` and `sh -c 'cat ~/secret'` are all
+refused.
+
+That is the whole guarantee. The filter only sees paths that appear verbatim
+as tokens, so it does **not** contain:
+
+- an allowed interpreter opening a path named in its code
+  (`python3 -c "open('../secret')"`, `node -e …`);
+- a shell payload that builds the path from variables or substitution
+  (`sh -c 'cat $HOME/secret'`, `cat $(printf ../secret)`);
+- commands re-invoked by `find -exec`, `xargs`, or `env`;
+- anything the command reaches through the network.
+
+`local_restricted` is therefore the right default for configs you trust and
+want protected from *obvious* mistakes by the model. If untrusted execution
+needs a real filesystem boundary, use `sandbox: { type: docker }` — that is
+the only mode that provides process isolation.
+
 ### Reducing blast radius
 
 - **`fs` tools:** always set `allowed_paths` explicitly. The default is `["."]`
@@ -80,23 +106,43 @@ export RAKITSU_API_TOKEN="$(openssl rand -hex 32 | tr -d '\n')"
 rakitsu serve --host 0.0.0.0
 ```
 
-When the token is set, the code-execution and state-changing endpoints
-(`/api/run`, `/api/configs/upload*`, `/api/browse`, `/api/workdir`,
-`/api/chat/start`, `/api/debug/*`, config deletion, and cross-session
-messaging) require `Authorization: Bearer <token>`. Read-only UI endpoints and
-the static web UI remain open so the page can load.
+When the token is set, the control plane is **default-deny**: every request
+under `/api/`, `/ws/`, `/events`, `/mcp` and `/a2a` requires
+`Authorization: Bearer <token>`. That includes the persisted-session history
+(`/api/sessions…` — queries, outputs, stored configs, deletion, rerun), the
+uploaded-config list and reads (configs can embed provider API keys), the
+live event stream, and the CLI↔hub reporting endpoints (`/api/hub/*`). A
+handler added under those prefixes is gated without a code change to the
+auth policy.
+
+The only public exceptions are `/health`, `/api/status` (version and boot id
+only), the A2A agent card at `/.well-known/agent-card.json` (the spec expects
+it to be fetchable so a client can learn what auth is required; the card
+advertises the bearer requirement), and the static web UI assets.
 
 The same token also satisfies cross-session messaging
-(`RAKITSU_SESSION_MSG_TOKEN` is still accepted for that feature specifically).
+(`RAKITSU_SESSION_MSG_TOKEN` is still accepted for that feature specifically;
+`/api/sessions/{id}/message` and `/inbox` are checked by that feature's own
+gate so a client holding only the messaging token keeps working).
+
+**CLI runs reporting to a token-protected hub** (`rakitsu run --hub …`,
+`rakitsu chat`) must have the same `RAKITSU_API_TOKEN` in their environment;
+the hub client sends it on every call, and the cli tool scrubs it from the
+subprocesses it spawns so an agent cannot read it back.
 
 ### Known limitations (Phase 2)
 
-- The **web UI over the network is not supported yet**: the browser cannot
-  attach the bearer token to page navigations, so use an SSH tunnel to reach
-  the UI remotely, or call the API directly with the token.
+- The **web UI does not work while a token is set**: the browser cannot
+  attach the bearer token to page navigations, `EventSource` or WebSocket
+  upgrades, and since the control plane is default-deny the UI loses the
+  history browser, config list and live event stream as well as the run/chat
+  controls. Run the hub on loopback without a token for local UI use, or
+  reach a remote hub through an SSH tunnel and call the API directly with the
+  token. UI-side token support is a separate follow-up.
 - The **MCP (`/mcp`) and A2A (`/a2a`) endpoints require the same bearer
-  token as everything else** (`requiresAuth` in `internal/server/auth.go`
-  matches both by path). The Agent Card discovery route
+  token as everything else**, and the standalone `--mcp-port` listener
+  mounts the MCP server at `/mcp` only, so no other path on that port can
+  reach it. The Agent Card discovery route
   (`/.well-known/agent-card.json`) is deliberately left open — the A2A spec
   expects it to be publicly fetchable so a client can learn what auth is
   required before authenticating, and the card advertises the requirement
@@ -120,7 +166,7 @@ an issue tagged `security` rather than a public disclosure.
 | You are… | Safe? | What protects you |
 |----------|-------|-------------------|
 | Running your own config locally | Yes | You trust your own config |
-| Running an **untrusted** config locally | **No** | Allowlist is not a boundary — use Docker sandbox + narrow `allowed_paths` |
+| Running an **untrusted** config locally | **No** | Allowlist and `allowed_paths` are not a boundary — use Docker sandbox |
 | `serve` on localhost | Yes | Only you can reach it |
 | `serve` on the network, no token | **Refused** | Won't start |
-| `serve` on the network, with token | Mostly | Token-gated API; UI/MCP/A2A caveats above |
+| `serve` on the network, with token | Mostly | Default-deny token-gated API; web UI needs a tunnel and no token |

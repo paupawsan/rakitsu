@@ -152,7 +152,7 @@ func startServe() {
 			mcpSrv := server.NewMCPServer(registry, Version)
 			mcpHTTP := &http.Server{
 				Addr:         fmt.Sprintf("%s:%d", serveHost, mcpPort),
-				Handler:      server.CorsMiddleware(server.AuthMiddleware(http.HandlerFunc(mcpSrv.ServeHTTP))),
+				Handler:      server.MCPListenerHandler(mcpSrv),
 				ReadTimeout:  30 * time.Second,
 				WriteTimeout: 30 * time.Second,
 				IdleTimeout:  60 * time.Second,

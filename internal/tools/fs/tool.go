@@ -5,10 +5,13 @@ package fs
 import (
 	"context"
 	"fmt"
+	"io"
+	"io/fs"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/paupawsan/rakitsu/internal/config"
 )
@@ -307,48 +310,157 @@ func (t *Tool) listDir(ctx context.Context, path, pattern string) (string, error
 	return strings.Join(lines, "\n"), nil
 }
 
-// searchFiles searches for files matching a pattern
+// searchFiles searches for files under basePath whose contents contain
+// contentPattern. Every candidate is opened through an os.Root anchored at
+// the allowed path containing basePath, so a symlink planted inside the
+// fence that points outside it is refused at open time by the kernel-level
+// root check — not by a pre-check that a rename could race — and the walk
+// itself never descends a symlinked directory.
+//
+// The allowed-path check in searchRoot and os.OpenRoot are both pathname
+// lookups, so a rename between them could anchor the root somewhere else.
+// They are bound together by inode: basePath is pinned as a handle before
+// anything is resolved by name, the search target is then opened once
+// through the root as its own handle, and the search proceeds only if that
+// handle is the same file as the pinned one — and only through that
+// handle, never by re-resolving basePath. A swap of the allowed directory
+// (or a parent of it) at any point after the pin therefore fails closed.
 func (t *Tool) searchFiles(ctx context.Context, basePath, contentPattern, filePattern string) (string, error) {
-	var results []string
-
-	err := filepath.Walk(basePath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // Skip files we can't access
-		}
-
-		// Skip directories
-		if info.IsDir() {
-			return nil
-		}
-
-		// Check file pattern
-		matched, err := filepath.Match(filePattern, info.Name())
-		if err != nil || !matched {
-			return nil
-		}
-
-		// Read file and search for content pattern
-		content, err := ioutil.ReadFile(path)
-		if err != nil {
-			return nil // Skip files we can't read
-		}
-
-		if strings.Contains(string(content), contentPattern) {
-			results = append(results, path)
-		}
-
-		return nil
-	})
-
+	// O_NONBLOCK because the allowed-path check has not run yet: basePath is
+	// still caller-chosen and may point outside the fence. Opening a FIFO
+	// blocks until a writer arrives, and ctx does not reach this open, so
+	// without it a named pipe would hang this goroutine before searchRoot
+	// could reject the path.
+	base, err := os.OpenFile(basePath, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return "", fmt.Errorf("search failed: %w", err)
 	}
-
-	if len(results) == 0 {
-		return "No files found containing: " + contentPattern, nil
+	defer base.Close()
+	baseInfo, err := base.Stat()
+	if err != nil {
+		return "", fmt.Errorf("search failed: %w", err)
+	}
+	if mode := baseInfo.Mode(); !mode.IsDir() && !mode.IsRegular() {
+		return "", fmt.Errorf("search failed: %s is not a regular file or directory", basePath)
 	}
 
-	return strings.Join(results, "\n"), nil
+	rootDir, rel, err := t.searchRoot(basePath)
+	if err != nil {
+		return "", err
+	}
+	root, err := os.OpenRoot(rootDir)
+	if err != nil {
+		return "", fmt.Errorf("search failed: %w", err)
+	}
+	defer root.Close()
+	moved := fmt.Errorf("search failed: %s changed while its allowed-path check was running", basePath)
+
+	var results []string
+	if !baseInfo.IsDir() {
+		// Single-file search: open it through the root and match on that
+		// handle only.
+		f, err := root.Open(rel)
+		if err != nil {
+			return "", fmt.Errorf("search failed: %w", err)
+		}
+		defer f.Close()
+		info, err := f.Stat()
+		if err != nil || !os.SameFile(info, baseInfo) {
+			return "", moved
+		}
+		if matched, _ := filepath.Match(filePattern, info.Name()); matched {
+			if content, ok := readRegular(f); ok && strings.Contains(string(content), contentPattern) {
+				results = append(results, basePath)
+			}
+		}
+		return formatSearchResults(results, contentPattern), nil
+	}
+
+	sub, err := root.OpenRoot(rel)
+	if err != nil {
+		return "", fmt.Errorf("search failed: %w", err)
+	}
+	defer sub.Close()
+	anchored, err := sub.Stat(".")
+	if err != nil || !os.SameFile(anchored, baseInfo) {
+		return "", moved
+	}
+
+	err = fs.WalkDir(sub.FS(), ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil // Skip entries we can't access
+		}
+		matched, err := filepath.Match(filePattern, d.Name())
+		if err != nil || !matched {
+			return nil
+		}
+		f, err := sub.Open(p) // refuses any symlink component resolving outside sub
+		if err != nil {
+			return nil
+		}
+		content, ok := readRegular(f)
+		f.Close()
+		if ok && strings.Contains(string(content), contentPattern) {
+			results = append(results, filepath.Join(basePath, filepath.FromSlash(p)))
+		}
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("search failed: %w", err)
+	}
+	return formatSearchResults(results, contentPattern), nil
+}
+
+func formatSearchResults(results []string, contentPattern string) string {
+	if len(results) == 0 {
+		return "No files found containing: " + contentPattern
+	}
+	return strings.Join(results, "\n")
+}
+
+// searchRoot returns the symlink-resolved allowed directory that contains
+// basePath, and basePath's position under it in io/fs form ("." for the
+// root itself).
+func (t *Tool) searchRoot(basePath string) (string, string, error) {
+	absBase, err := filepath.Abs(basePath)
+	if err != nil {
+		return "", "", err
+	}
+	realBase := resolvePathWithSymlinks(absBase)
+	sep := string(filepath.Separator)
+	for _, allowed := range t.allowedPaths {
+		absAllowed, err := filepath.Abs(allowed)
+		if err != nil {
+			continue
+		}
+		realAllowed := resolvePathWithSymlinks(absAllowed)
+		trimmed := strings.TrimRight(realAllowed, sep)
+		if realBase != trimmed && !strings.HasPrefix(realBase, trimmed+sep) {
+			continue
+		}
+		if trimmed == "" {
+			trimmed = sep // allowed path is the filesystem root
+		}
+		rel, err := filepath.Rel(trimmed, realBase)
+		if err != nil {
+			continue
+		}
+		return trimmed, filepath.ToSlash(rel), nil
+	}
+	return "", "", &PathNotAllowedError{Path: basePath, Allowed: t.allowedPaths}
+}
+
+// readRegular returns f's content when it is a regular file.
+func readRegular(f *os.File) ([]byte, bool) {
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, false
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, false
+	}
+	return data, true
 }
 
 // PathNotAllowedError is returned when a path is not in allowed paths

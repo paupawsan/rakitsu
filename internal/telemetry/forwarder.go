@@ -125,7 +125,7 @@ func (c *HubClient) forwardEvents() {
 		if err != nil {
 			return
 		}
-		resp, err := c.client.Post(c.hubURL+"/api/hub/ingest", "application/json", bytes.NewReader(data))
+		resp, err := c.do(http.MethodPost, "/api/hub/ingest", bytes.NewReader(data))
 		if err == nil {
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
@@ -158,12 +158,12 @@ func (c *HubClient) pollCommands() {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	url := fmt.Sprintf("%s/api/hub/commands?id=%s", c.hubURL, c.sessionID)
+	path := fmt.Sprintf("/api/hub/commands?id=%s", c.sessionID)
 
 	for {
 		select {
 		case <-ticker.C:
-			resp, err := c.client.Get(url)
+			resp, err := c.do(http.MethodGet, path, nil)
 			if err != nil {
 				continue
 			}
@@ -194,12 +194,34 @@ func (c *HubClient) pollCommands() {
 	}
 }
 
+// apiTokenEnv mirrors internal/server's constant (auth.go); duplicated so
+// this package stays independent of internal/server. The hub gates its
+// CLI-report endpoints behind this token, so a CLI
+// reporting to a token-protected hub must run with the same token in its
+// environment — the cli tool scrubs it from spawned subprocesses.
+const apiTokenEnv = "RAKITSU_API_TOKEN"
+
+// do sends one request to the hub, attaching the API token when configured.
+func (c *HubClient) do(method, path string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest(method, c.hubURL+path, body)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if tok := os.Getenv(apiTokenEnv); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	return c.client.Do(req)
+}
+
 func (c *HubClient) post(path string, body interface{}) error {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
-	resp, err := c.client.Post(c.hubURL+path, "application/json", bytes.NewReader(data))
+	resp, err := c.do(http.MethodPost, path, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}

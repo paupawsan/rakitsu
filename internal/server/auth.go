@@ -74,76 +74,65 @@ func TokenConfigured() bool {
 }
 
 // requiresAuth reports whether a request targets a control-plane endpoint that
-// must be authenticated when an API token is configured. The set is limited to
-// endpoints that can execute code, mutate runs/configs, drive the debugger, or
-// disclose local filesystem layout — read-only UI data and the static SPA stay
-// open so the page can load.
+// must be authenticated when an API token is configured.
 //
-// Wiring a new handler onto the mux? It needs adding here too — this is an
-// allowlist, not a default-deny, so a forgotten endpoint fails open.
+// Default-deny: every path under the API, stream and
+// protocol prefixes is gated unless it is one of the explicit public
+// exceptions here. A handler wired onto the mux under /api/, /ws/, /events,
+// /mcp or /a2a is therefore gated without touching this file; only adding a
+// NEW public exception needs a change here, and it should be justified in a
+// comment. Everything outside those prefixes is the embedded static SPA.
+//
+// What that means in practice once a token is set: the web UI (which cannot
+// attach a bearer token to page navigations, EventSource or WebSocket
+// upgrades) loses the history browser, config list and live event stream in
+// addition to the run/chat controls that were already gated. That is
+// deliberate — persisted sessions disclose queries, outputs and configs
+// (which may embed provider API keys), and the previous allowlist left them
+// open for UI compatibility. See docs/SECURITY.md.
 func requiresAuth(r *http.Request) bool {
 	p := r.URL.Path
 	switch p {
-	case "/api/run", "/api/run/stop",
-		"/api/browse", "/api/workdir",
-		"/api/configs/upload", "/api/configs/upload-zip", "/api/configs/inline",
-		// isAllowedProxyTarget (sse.go) blocks the obvious SSRF targets, but
-		// still allows loopback and private ranges by design (reaching
-		// local/Tailscale-networked LLM providers). That's fine when the
-		// server only binds loopback; once RequireBindAllowed permits a
-		// non-loopback bind, this outbound-request proxy becomes reachable
-		// by anyone on that network too, so it needs the same token gate as
-		// every other endpoint that can be pointed at internal targets.
-		"/api/providers/models", "/api/providers/model-info":
-		return true
+	case "/health", "/api/status":
+		// Liveness and version/boot-id only; nothing user- or run-specific.
+		return false
+	case "/.well-known/agent-card.json":
+		// A2A discovery: the spec expects the card to be fetchable so a
+		// client can learn what auth is required before authenticating, and
+		// the card advertises the bearer requirement whenever a token is set.
+		return false
 	}
-	// MCPServer (mcp.go) executes arbitrary registered tools and has no auth
-	// check of its own. Its standalone http.Server (--mcp-port) has nothing
-	// else mounted on it, so match by prefix rather than the documented "/mcp"
-	// convention alone — ServeHTTP itself doesn't restrict which path it
-	// answers on. A2A is the same shape: full tool-execution surface, no auth
-	// of its own.
-	if strings.HasPrefix(p, "/mcp") || p == "/a2a" {
-		return true
+	// Cross-session messaging has its own gate (sessionMsgAuthorized, in
+	// session_message.go) that accepts RAKITSU_SESSION_MSG_TOKEN as well as
+	// the API token, so a client holding only the messaging token still
+	// works. Requiring the API token here would lock those clients out; the
+	// handler still refuses unauthenticated callers whenever either token is
+	// configured. Only the exact {id}/message and {id}/inbox shapes are
+	// deferred — every other /api/sessions/... path is gated below.
+	if rest, ok := strings.CutPrefix(p, "/api/sessions/"); ok {
+		if id, action, found := strings.Cut(rest, "/"); found && id != "" && (action == "message" || action == "inbox") {
+			return false
+		}
 	}
-	// Every debugger endpoint is sensitive: it inspects live agent state or
-	// injects parameter overrides.
-	if strings.HasPrefix(p, "/api/debug/") {
-		return true
+	for _, prefix := range []string{"/api/", "/ws/", "/mcp", "/a2a"} {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
 	}
-	// Every chat endpoint is sensitive too: /api/chat lists live session IDs,
-	// /api/chat/{id}/... can stop or fork a session or read its transcript,
-	// and /ws/chat/{id} drives a session's agent turns over the socket. A
-	// client that could enumerate sessions via the unauthenticated list and
-	// then drive one via the unauthenticated socket would bypass every other
-	// gate here.
-	if p == "/api/chat" || strings.HasPrefix(p, "/api/chat/") || strings.HasPrefix(p, "/ws/chat/") {
-		return true
-	}
-	// Same shape, the hub's UI-facing endpoints: /api/hub/sessions (and its
-	// /events variant) discloses every active session's query and full
-	// buffered event stream, and /api/hub/debug injects debug/param-override
-	// commands into one by ID. The CLI-report side of the hub (register,
-	// deregister, ingest, commands, message-result) is deliberately NOT
-	// gated here — the hub forwarder (internal/telemetry/forwarder.go) sends
-	// no Authorization header, so gating those would break CLI<->hub
-	// reporting the moment a token is configured.
-	if p == "/api/hub/debug" || p == "/api/hub/sessions" || p == "/api/hub/sessions/events" {
-		return true
-	}
-	// Same shape again: /api/sessions/live discloses every live session's
-	// ID, name, kind, and status (LiveSessionMeta); /api/runtime/sessions
-	// discloses a superset — ID, name, mode, status, plus config ID,
-	// started/ended timestamps, agent, and model (session.SessionMeta).
-	// Same enumeration risk gated above for /api/hub/sessions, either way.
-	if p == "/api/sessions/live" || p == "/api/runtime/sessions" {
-		return true
-	}
-	// Deleting a specific stored config.
-	if r.Method == http.MethodDelete && strings.HasPrefix(p, "/api/configs/") {
-		return true
-	}
-	return false
+	return p == "/api" || p == "/events"
+}
+
+// MCPListenerHandler builds the handler for the standalone --mcp-port
+// listener: the MCP server mounted at /mcp only, behind the same CORS and
+// token middleware as the hub. MCPServer.ServeHTTP itself ignores the request
+// path, so mounting it as the listener's root handler would answer — and
+// execute tools for — any path; requiresAuth is default-deny, but the mux is
+// what guarantees nothing other than /mcp can reach the handler regardless
+// of how the auth policy evolves.
+func MCPListenerHandler(mcp *MCPServer) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", mcp)
+	return CorsMiddleware(AuthMiddleware(mux))
 }
 
 // AuthMiddleware enforces the API token on control-plane endpoints when

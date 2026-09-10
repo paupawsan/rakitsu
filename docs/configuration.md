@@ -361,17 +361,17 @@ tools:
 
 > **Read [SECURITY.md](SECURITY.md) first.** The `local_restricted` command
 > allowlist is a guard rail against mistakes, **not** a security boundary — it
-> permits `python3`/`node`/`bash`/`find`, which can run arbitrary code. Only
-> run configs you trust; use `type: docker` with narrow `allowed_paths` for
-> untrusted work, and never expose `rakitsu serve` to the network without
-> `RAKITSU_API_TOKEN`.
+> permits `python3`/`node`/`bash`/`find`, which can run arbitrary code, and
+> `allowed_paths` only filters the paths that appear as command *arguments*.
+> Only run configs you trust; use `type: docker` for untrusted work, and never
+> expose `rakitsu serve` to the network without `RAKITSU_API_TOKEN`.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `type` | string | Sandbox type: `local_restricted`, `docker` |
 | `image` | string | Docker image (for `docker` type) |
 | `mount_workdir` | bool | Mount working directory into container |
-| `allowed_paths` | []string | Allowed filesystem paths |
+| `allowed_paths` | []string | `local_restricted`: the command runs in `allowed_paths[0]` (unless `working_dir` is set) and any argument token that resolves outside every listed directory (`../x`, absolute paths, symlinks out, `~/x` in shell payloads) is refused. An argument filter, not containment — see SECURITY.md. |
 | `network_isolated` | bool | Disable network access |
 | `resource_limits` | ResourceLimits | Resource constraints |
 
