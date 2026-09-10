@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/paupawsan/rakitsu/internal/config"
 )
@@ -325,7 +326,12 @@ func (t *Tool) listDir(ctx context.Context, path, pattern string) (string, error
 // handle, never by re-resolving basePath. A swap of the allowed directory
 // (or a parent of it) at any point after the pin therefore fails closed.
 func (t *Tool) searchFiles(ctx context.Context, basePath, contentPattern, filePattern string) (string, error) {
-	base, err := os.Open(basePath)
+	// O_NONBLOCK because the allowed-path check has not run yet: basePath is
+	// still caller-chosen and may point outside the fence. Opening a FIFO
+	// blocks until a writer arrives, and ctx does not reach this open, so
+	// without it a named pipe would hang this goroutine before searchRoot
+	// could reject the path.
+	base, err := os.OpenFile(basePath, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return "", fmt.Errorf("search failed: %w", err)
 	}
@@ -333,6 +339,9 @@ func (t *Tool) searchFiles(ctx context.Context, basePath, contentPattern, filePa
 	baseInfo, err := base.Stat()
 	if err != nil {
 		return "", fmt.Errorf("search failed: %w", err)
+	}
+	if mode := baseInfo.Mode(); !mode.IsDir() && !mode.IsRegular() {
+		return "", fmt.Errorf("search failed: %s is not a regular file or directory", basePath)
 	}
 
 	rootDir, rel, err := t.searchRoot(basePath)
