@@ -17,7 +17,7 @@
     "@vue-flow/minimap": "^1.5.4",
     "@vue-flow/node-resizer": "^1.5.1",
     "elkjs": "^0.11.1",
-    "js-yaml": "^4.1.1",
+    "js-yaml": "^4.3.2",
     "jszip": "^3.10.1",
     "markdown-it": "^14.1.1",
     "vue": "^3.5.25",
