@@ -2,8 +2,10 @@ package telemetry
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -169,5 +171,48 @@ func TestHubClientSendsAPITokenWhenConfigured(t *testing.T) {
 	defer mu.Unlock()
 	if got := seen["/api/hub/register"]; got != "" {
 		t.Errorf("no token configured: Authorization = %q, want empty", got)
+	}
+}
+
+// TestForwardEvents_RedactsToolCallArguments regression-guards #70:
+// forwardEvents used to POST TOOL_CALL_START.Arguments verbatim to the
+// hub's /api/hub/ingest, so any credential-shaped argument (a token,
+// api_key, password, ...) reached the hub stream unredacted.
+func TestForwardEvents_RedactsToolCallArguments(t *testing.T) {
+	bodyCh := make(chan []byte, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/hub/ingest" {
+			b, _ := io.ReadAll(r.Body)
+			bodyCh <- b
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	eventBus := NewEventBus(8)
+	c := NewHubClient(srv.URL, "cli-1", eventBus)
+	c.Start()
+	defer c.Stop("done")
+
+	eventBus.Emit("agent", EventToolCallStart, ToolCallStartPayload{
+		ToolCallID: "tc-1",
+		ToolName:   "cli",
+		Arguments: map[string]interface{}{
+			"command": "curl",
+			"token":   "sk-secret",
+		},
+	})
+
+	select {
+	case b := <-bodyCh:
+		body := string(b)
+		if strings.Contains(body, "sk-secret") {
+			t.Fatalf("secret token leaked unredacted into hub ingest body: %s", body)
+		}
+		if !strings.Contains(body, `"token":"[REDACTED]"`) {
+			t.Fatalf("expected a redacted token value in the hub ingest body, got: %s", body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for /api/hub/ingest")
 	}
 }

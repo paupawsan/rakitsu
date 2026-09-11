@@ -114,6 +114,8 @@ func (s *SessionStore) WriteEvent(event telemetry.AgentEvent) {
 		return
 	}
 
+	event.Payload = telemetry.RedactEventPayload(event.EventType, event.Payload)
+
 	line, err := json.Marshal(event)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "session store: marshal error: %v\n", err)
