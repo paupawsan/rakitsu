@@ -71,7 +71,7 @@ func (t *Tool) GetParametersSchema() map[string]interface{} {
 	}
 
 	props := schema["properties"].(map[string]interface{})
-	var required []string
+	required := []string{}
 
 	for name, param := range t.parameters {
 		prop := map[string]interface{}{
