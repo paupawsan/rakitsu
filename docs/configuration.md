@@ -339,7 +339,7 @@ tools:
 | `timeout_seconds` | int | Execution timeout |
 | `env` | map[string]string | Environment variables |
 | `working_dir` | string | Working directory |
-| `allowed_paths` | []string | Allowed filesystem paths |
+| `allowed_paths` | []string | Allowed filesystem paths. **Set this explicitly for `fs` tools** — the default (`["."]`) is the whole launch directory, which includes `.env`/`.git`/anything else sitting next to the config unless you fence it off. |
 | `args` | []string | Subprocess args (for `mcp_server` type, stdio transport) |
 | `url` | string | Server URL (for `mcp_server` type, http transport; also used by `a2a` type) |
 | `transport` | string | `stdio` or `http` (for `mcp_server` type) |
@@ -370,9 +370,12 @@ tools:
 |-------|------|-------------|
 | `type` | string | Sandbox type: `local_restricted`, `docker` |
 | `image` | string | Docker image (for `docker` type) |
-| `mount_workdir` | bool | Mount working directory into container |
+| `mount_workdir` | bool | Mount working directory into container, read-only by default (see `mount_workdir_writable`) |
+| `mount_workdir_writable` | bool | `docker`: mount the working directory read-write instead of read-only. Needed if the command must write into the workdir (e.g. a formatter that rewrites files in place); leave off for anything that only reads it. |
 | `allowed_paths` | []string | `local_restricted`: the command runs in `allowed_paths[0]` (unless `working_dir` is set) and any argument token that resolves outside every listed directory (`../x`, absolute paths, symlinks out, `~/x` in shell payloads) is refused. An argument filter, not containment — see SECURITY.md. |
-| `network_isolated` | bool | Disable network access |
+| `network_isolated` | bool | Deprecated alias for the default (no network). Kept for backward compatibility; use `allow_network` to opt back in. |
+| `allow_network` | bool | `docker`: give the container network access. Default is none — most `cli` tools (linters, formatters, interpreters) don't need it, and a container that can't reach the network can't exfiltrate or phone home even if the command turns out hostile. |
+| `user` | string | `docker`: `--user` the container runs as, `"uid:gid"`. Defaults to `65534:65534` (nobody:nogroup) — a container escape or compromised tool doesn't come out as root. |
 | `resource_limits` | ResourceLimits | Resource constraints |
 
 ### ResourceLimits
@@ -382,6 +385,8 @@ tools:
 | `cpu_limit` | string | CPU limit (e.g., `"0.5"`) |
 | `memory_limit` | string | Memory limit (e.g., `"256m"`) |
 | `timeout_sec` | int | Execution timeout in seconds |
+| `max_output_bytes` | int | Caps captured stdout/stderr for `cli` tools, and file size for `fs` `read` operations. `0` applies a conservative default (8KB for `cli`, 10MB for `fs`); `-1` disables the cap. |
+| `pids_limit` | int | `docker`: caps the container's process/thread count (`--pids-limit`), a floor against a fork bomb or runaway subprocess spawn. `0` applies a default of 128; `-1` disables the cap. |
 
 ## Skills
 

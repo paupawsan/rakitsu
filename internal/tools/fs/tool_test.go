@@ -3,6 +3,7 @@ package fs
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,6 +121,91 @@ func TestRead_ExistingFile(t *testing.T) {
 	}
 	if !strings.Contains(out, "hello world") {
 		t.Errorf("expected 'hello world' in output, got %q", out)
+	}
+}
+
+// TestRead_LargeFile_TruncatedAtCap: readFile used to ioutil.ReadFile the
+// whole file into memory regardless
+// of size, so a huge or special file was a memory + context-blowout DoS.
+// A file bigger than the configured max_output_bytes cap must be
+// truncated, not fully buffered and returned whole.
+func TestRead_LargeFile_TruncatedAtCap(t *testing.T) {
+	dir := t.TempDir()
+	file := writeTemp(t, dir, strings.Repeat("x", 100))
+	tool := NewTool(&config.ToolDefinition{
+		Name:         "test-fs",
+		Operation:    "read",
+		AllowedPaths: []string{dir},
+		Sandbox: &config.SandboxConfig{
+			ResourceLimits: config.ResourceLimits{MaxOutputBytes: 10},
+		},
+	})
+
+	out, err := tool.Execute(context.Background(), map[string]interface{}{"path": file})
+	if err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	content, marker, found := strings.Cut(out, "\n...")
+	if !found {
+		t.Fatalf("expected a truncation marker, got: %q", out)
+	}
+	if content != strings.Repeat("x", 10) {
+		t.Fatalf("expected exactly 10 bytes of file content before the marker, got %q", content)
+	}
+	if !strings.Contains(marker, "truncated") {
+		t.Fatalf("expected 'truncated' in the marker, got: %q", marker)
+	}
+}
+
+// TestRead_MaxIntMaxOutputBytes_NoOverflow regression-guards a finding
+// from code review: int64(maxBytes)+1 overflows to a
+// negative number when max_output_bytes is set to math.MaxInt64, which
+// made io.LimitReader return EOF immediately — a valid file read came
+// back empty instead of applying the (effectively unlimited) cap.
+func TestRead_MaxIntMaxOutputBytes_NoOverflow(t *testing.T) {
+	dir := t.TempDir()
+	content := strings.Repeat("z", 100)
+	file := writeTemp(t, dir, content)
+	tool := NewTool(&config.ToolDefinition{
+		Name:         "test-fs",
+		Operation:    "read",
+		AllowedPaths: []string{dir},
+		Sandbox: &config.SandboxConfig{
+			ResourceLimits: config.ResourceLimits{MaxOutputBytes: math.MaxInt64},
+		},
+	})
+
+	out, err := tool.Execute(context.Background(), map[string]interface{}{"path": file})
+	if err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	if out != content {
+		t.Fatalf("expected full content with max_output_bytes at MaxInt64, got %q", out)
+	}
+}
+
+// TestRead_NegativeMaxOutputBytes_DisablesCap regression-guards that -1
+// (the documented opt-out, mirroring cli's DefaultMaxOutputBytes) still
+// returns the file whole rather than being misread as "use the default".
+func TestRead_NegativeMaxOutputBytes_DisablesCap(t *testing.T) {
+	dir := t.TempDir()
+	content := strings.Repeat("y", 100)
+	file := writeTemp(t, dir, content)
+	tool := NewTool(&config.ToolDefinition{
+		Name:         "test-fs",
+		Operation:    "read",
+		AllowedPaths: []string{dir},
+		Sandbox: &config.SandboxConfig{
+			ResourceLimits: config.ResourceLimits{MaxOutputBytes: -1},
+		},
+	})
+
+	out, err := tool.Execute(context.Background(), map[string]interface{}{"path": file})
+	if err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	if out != content {
+		t.Fatalf("expected full content with cap disabled, got %q", out)
 	}
 }
 

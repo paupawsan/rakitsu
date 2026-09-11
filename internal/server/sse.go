@@ -1101,7 +1101,7 @@ func (s *SSEServer) handleProviderModels(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := newProxyHTTPClient()
 
 	// Try /v1/models first, then /models, then /model/info (LiteLLM variants)
 	var body []byte
@@ -1183,7 +1183,7 @@ func (s *SSEServer) handleProviderModelInfo(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := newProxyHTTPClient()
 
 	// Try LiteLLM /model/info first, then /model_group/info
 	endpoints := []string{"/model/info", "/model_group/info"}
@@ -1585,6 +1585,68 @@ func isAllowedProxyIP(ip net.IP) bool {
 	// 192.168.x) are allowed — this proxy exists specifically to reach
 	// local/Tailscale-networked LLM providers.
 	return true
+}
+
+// newProxyHTTPClient returns an http.Client for the model-list/model-info
+// proxy endpoints that enforces isAllowedProxyTarget's IP policy at the
+// actual dial, not just at the callers' pre-check.
+//
+// isAllowedProxyTarget resolves the hostname once via net.LookupHost to
+// decide whether to even attempt the request. The http.Client then does
+// its own, separate DNS resolution when it actually connects — a
+// malicious DNS server can answer those two lookups differently (classic
+// TOCTOU/DNS-rebinding SSRF): a safe address for the pre-check, then a
+// blocked one (e.g. the cloud metadata IP) moments later for the real
+// connection. Overriding DialContext to resolve-and-validate at dial time
+// closes that gap; CheckRedirect re-validates a redirect target the same
+// way, since a redirect response isn't covered by either lookup.
+func newProxyHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: &http.Transport{DialContext: ssrfSafeDialContext},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if !isAllowedProxyTarget(req.URL.String()) {
+				return fmt.Errorf("redirect to a blocked address")
+			}
+			return nil
+		},
+	}
+}
+
+// ssrfSafeDialContext resolves addr (if it's a hostname, not a literal IP)
+// and validates it against isAllowedProxyIP immediately before dialing —
+// the same policy isAllowedProxyTarget's pre-check applies, but re-checked
+// at connect time so a rebinding DNS server answering the two lookups
+// differently can't smuggle a blocked address past the pre-check. Split
+// out from newProxyHTTPClient so it's unit-testable without a real
+// network dial.
+var proxyDialer = &net.Dialer{Timeout: 10 * time.Second}
+
+func ssrfSafeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		addrs, lookupErr := net.DefaultResolver.LookupHost(ctx, host)
+		if lookupErr != nil || len(addrs) == 0 {
+			return nil, fmt.Errorf("proxy dial: cannot resolve %s", host)
+		}
+		ip = nil
+		for _, a := range addrs {
+			if candidate := net.ParseIP(a); candidate != nil && isAllowedProxyIP(candidate) {
+				ip = candidate
+				break
+			}
+		}
+		if ip == nil {
+			return nil, fmt.Errorf("proxy dial: %s resolves to a blocked address", host)
+		}
+	} else if !isAllowedProxyIP(ip) {
+		return nil, fmt.Errorf("proxy dial: %s is a blocked address", host)
+	}
+	return proxyDialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
 }
 
 // isAllowedOrigin checks if the origin is localhost or loopback.

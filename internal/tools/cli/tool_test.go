@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -681,6 +682,72 @@ func TestBuildDockerArgs_HardensContainer(t *testing.T) {
 	if !strings.Contains(joined, "--tmpfs /tmp") {
 		t.Errorf("docker args missing a writable /tmp tmpfs (needed since --read-only locks the rest of the root fs), got: %v", args)
 	}
+}
+
+// TestBuildDockerArgs_DefaultsHardenFurther: a bare docker sandbox config
+// used to run as root, with every Linux
+// capability, no process-count limit, an open network, and a writable
+// workdir bind mount.
+func TestBuildDockerArgs_DefaultsHardenFurther(t *testing.T) {
+	sandbox := &config.SandboxConfig{Type: "docker", MountWorkdir: true}
+	args := buildDockerArgs(sandbox, []string{"echo", "hi"})
+	joined := strings.Join(args, " ")
+
+	if !strings.Contains(joined, "--cap-drop ALL") {
+		t.Errorf("docker args missing --cap-drop ALL, got: %v", args)
+	}
+	if !strings.Contains(joined, "--user "+DefaultDockerUser) {
+		t.Errorf("docker args missing default non-root --user, got: %v", args)
+	}
+	if !strings.Contains(joined, "--pids-limit "+strconv.Itoa(DefaultPidsLimit)) {
+		t.Errorf("docker args missing default --pids-limit, got: %v", args)
+	}
+	if !strings.Contains(joined, "--network none") {
+		t.Errorf("docker args should default to no network, got: %v", args)
+	}
+	if !containsArgPair(args, "-v", func(v string) bool { return strings.HasSuffix(v, ":ro") }) {
+		t.Errorf("workdir bind mount should default to read-only, got: %v", args)
+	}
+}
+
+// TestBuildDockerArgs_OverridesRespected checks every new hardening knob
+// can be explicitly opted out of, since some workloads (npm/pip install,
+// a build step that writes into the workdir) legitimately need to.
+func TestBuildDockerArgs_OverridesRespected(t *testing.T) {
+	sandbox := &config.SandboxConfig{
+		Type:                 "docker",
+		MountWorkdir:         true,
+		MountWorkdirWritable: true,
+		AllowNetwork:         true,
+		User:                 "1000:1000",
+		ResourceLimits:       config.ResourceLimits{PidsLimit: -1},
+	}
+	args := buildDockerArgs(sandbox, []string{"echo", "hi"})
+	joined := strings.Join(args, " ")
+
+	if strings.Contains(joined, "--network none") {
+		t.Errorf("AllowNetwork should skip --network none, got: %v", args)
+	}
+	if strings.Contains(joined, "--pids-limit") {
+		t.Errorf("PidsLimit: -1 should skip --pids-limit, got: %v", args)
+	}
+	if !strings.Contains(joined, "--user 1000:1000") {
+		t.Errorf("User override not applied, got: %v", args)
+	}
+	if containsArgPair(args, "-v", func(v string) bool { return strings.HasSuffix(v, ":ro") }) {
+		t.Errorf("MountWorkdirWritable should mount workdir read-write, got: %v", args)
+	}
+}
+
+// containsArgPair reports whether args has flag immediately followed by a
+// value matching pred.
+func containsArgPair(args []string, flag string, pred func(string) bool) bool {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) && pred(args[i+1]) {
+			return true
+		}
+	}
+	return false
 }
 
 // ============================================================

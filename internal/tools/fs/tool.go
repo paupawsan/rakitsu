@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"io/ioutil"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,14 @@ import (
 
 	"github.com/paupawsan/rakitsu/internal/config"
 )
+
+// DefaultMaxReadBytes caps how much of a file readFile loads into memory
+// when the config leaves sandbox.resource_limits.max_output_bytes unset
+// (0). A huge or special file (e.g. /dev/zero, a multi-GB log) would
+// otherwise be fully buffered by ioutil.ReadFile before any cap applied,
+// which is a memory + context-blowout DoS. Set max_output_bytes to -1 to
+// disable the cap entirely.
+const DefaultMaxReadBytes = 10 * 1024 * 1024 // 10MB
 
 // Tool implements the Tool interface for file system operations
 type Tool struct {
@@ -24,6 +33,7 @@ type Tool struct {
 	allowedPaths []string // Security: restrict file access
 	workingDir   string   // resolve relative paths against this
 	parameters   map[string]config.Parameter
+	sandbox      *config.SandboxConfig
 }
 
 // NewTool creates a new FS tool from configuration
@@ -49,7 +59,18 @@ func NewTool(def *config.ToolDefinition) *Tool {
 		allowedPaths: allowedPaths,
 		workingDir:   workDir,
 		parameters:   def.Parameters,
+		sandbox:      def.Sandbox,
 	}
+}
+
+// maxReadBytes returns the cap applied to readFile: the config's
+// sandbox.resource_limits.max_output_bytes when set, else
+// DefaultMaxReadBytes. A negative value disables the cap.
+func (t *Tool) maxReadBytes() int {
+	if t.sandbox == nil || t.sandbox.ResourceLimits.MaxOutputBytes == 0 {
+		return DefaultMaxReadBytes
+	}
+	return t.sandbox.ResourceLimits.MaxOutputBytes
 }
 
 // GetName returns the tool's name
@@ -210,7 +231,9 @@ func resolvePathWithSymlinks(absPath string) string {
 	return absPath // fallback to original
 }
 
-// readFile reads the contents of a file
+// readFile reads the contents of a file, capped at maxReadBytes so a huge
+// or special file (e.g. /dev/zero, a multi-GB log) cannot be fully
+// buffered into memory before any limit applies.
 func (t *Tool) readFile(ctx context.Context, path string) (string, error) {
 	// Check if file exists
 	info, err := os.Stat(path)
@@ -223,12 +246,40 @@ func (t *Tool) readFile(ctx context.Context, path string) (string, error) {
 		return "", fmt.Errorf("path is a directory, not a file")
 	}
 
-	// Read file contents
-	content, err := ioutil.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return "", fmt.Errorf("failed to read file: %w", err)
 	}
+	defer f.Close()
 
+	maxBytes := t.maxReadBytes()
+	if maxBytes < 0 {
+		content, err := io.ReadAll(f)
+		if err != nil {
+			return "", fmt.Errorf("failed to read file: %w", err)
+		}
+		return string(content), nil
+	}
+
+	// Read one byte past the cap so we can tell a capped read from a file
+	// that happens to be exactly maxBytes long, without ever buffering
+	// more than maxBytes+1 bytes regardless of the file's real size.
+	// Guard the +1 against overflow: max_output_bytes is a config value an
+	// operator could set to math.MaxInt64, and int64(maxBytes)+1 wrapping
+	// negative would make LimitReader return EOF immediately, truncating
+	// every read to empty instead of applying the (effectively unlimited)
+	// cap.
+	lookahead := int64(maxBytes)
+	if lookahead < math.MaxInt64 {
+		lookahead++
+	}
+	content, err := io.ReadAll(io.LimitReader(f, lookahead))
+	if err != nil {
+		return "", fmt.Errorf("failed to read file: %w", err)
+	}
+	if len(content) > maxBytes {
+		return string(content[:maxBytes]) + fmt.Sprintf("\n... [truncated, file is %d+ bytes, max_output_bytes cap is %d]", info.Size(), maxBytes), nil
+	}
 	return string(content), nil
 }
 
