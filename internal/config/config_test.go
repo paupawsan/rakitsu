@@ -393,6 +393,58 @@ agents:
 	}
 }
 
+func TestLoad_MCPServerToolExpandsEnvVars(t *testing.T) {
+	t.Setenv("TEST_KG_MCP_URL", "http://kg.example:8111/mcp")
+	t.Setenv("TEST_MCP_COMMAND", "test-mcp-server")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.yaml")
+	yamlContent := `
+name: mcp-expand-test
+version: "1.0"
+tools:
+  - name: kg
+    type: mcp_server
+    transport: http
+    url: ${TEST_KG_MCP_URL}
+  - name: browser
+    type: mcp_server
+    transport: stdio
+    command: ${TEST_MCP_COMMAND}
+    args: ["${TEST_KG_MCP_URL}"]
+agents:
+  - name: Coordinator
+    role: worker
+`
+	if err := os.WriteFile(path, []byte(yamlContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	kg := cfg.GetTool("kg")
+	if kg == nil {
+		t.Fatal("tool \"kg\" not found")
+	}
+	if kg.URL != "http://kg.example:8111/mcp" {
+		t.Errorf("kg.URL = %q, want the expanded env var value", kg.URL)
+	}
+
+	browser := cfg.GetTool("browser")
+	if browser == nil {
+		t.Fatal("tool \"browser\" not found")
+	}
+	if browser.Command != "test-mcp-server" {
+		t.Errorf("browser.Command = %q, want the expanded env var value", browser.Command)
+	}
+	if len(browser.Args) != 1 || browser.Args[0] != "http://kg.example:8111/mcp" {
+		t.Errorf("browser.Args = %v, want expanded env var in args[0]", browser.Args)
+	}
+}
+
 func TestRedacted_Nil(t *testing.T) {
 	got := Redacted(nil)
 	if got == nil {

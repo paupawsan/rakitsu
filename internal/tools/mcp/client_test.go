@@ -252,6 +252,92 @@ func TestStdioClient_MockEcho(t *testing.T) {
 	}
 }
 
+// TestHTTPClient_SendsAcceptBothJSONAndEventStream is the regression test
+// for the 406 bug: streamable-HTTP MCP servers (e.g. the real kg MCP
+// server) reject a request that doesn't accept both application/json and
+// text/event-stream, even though they may still answer with plain JSON.
+func TestHTTPClient_SendsAcceptBothJSONAndEventStream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		accept := r.Header.Get("Accept")
+		if !strings.Contains(accept, "application/json") || !strings.Contains(accept, "text/event-stream") {
+			t.Errorf("Accept header = %q, want it to contain both application/json and text/event-stream", accept)
+		}
+		var req rpcRequest
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(rpcResponse{ //nolint:errcheck
+			JSONRPC: "2.0", ID: req.ID,
+			Result: json.RawMessage(`{"protocolVersion":"2024-11-05"}`),
+		})
+	}))
+	defer srv.Close()
+
+	client, err := NewHTTPClient(srv.URL, 10)
+	if err != nil {
+		t.Fatalf("NewHTTPClient: %v", err)
+	}
+	if err := client.Initialize(context.Background()); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+}
+
+// TestHTTPClient_SSEFramedResponse covers a real streamable-HTTP MCP
+// server's actual behavior: once it sees Accept: text/event-stream, it
+// replies with Content-Type: text/event-stream and an "event: message\n
+// data: {...}\n\n" framed body instead of a plain JSON body. The client
+// must unwrap that framing to reach the JSON-RPC payload.
+func TestHTTPClient_SSEFramedResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcRequest
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		payload, _ := json.Marshal(rpcResponse{ //nolint:errcheck
+			JSONRPC: "2.0", ID: req.ID,
+			Result: json.RawMessage(`{"protocolVersion":"2024-11-05"}`),
+		})
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "event: message\ndata: %s\n\n", payload)
+	}))
+	defer srv.Close()
+
+	client, err := NewHTTPClient(srv.URL, 10)
+	if err != nil {
+		t.Fatalf("NewHTTPClient: %v", err)
+	}
+	if err := client.Initialize(context.Background()); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+}
+
+// TestHTTPClient_SSEFramedResponse_LargeLine is the regression test for the
+// scanner buffer-size finding: a "data:" line bigger than bufio.Scanner's
+// default 64 KiB token limit (but within the intended 1 MiB response cap)
+// must decode, not fail with "token too long".
+func TestHTTPClient_SSEFramedResponse_LargeLine(t *testing.T) {
+	// Padding pushes the single SSE line well past the 64 KiB default
+	// scanner limit while staying under the 1 MiB response cap.
+	padding := strings.Repeat("x", 100*1024)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcRequest
+		json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+		payload, _ := json.Marshal(rpcResponse{ //nolint:errcheck
+			JSONRPC: "2.0", ID: req.ID,
+			Result: json.RawMessage(fmt.Sprintf(`{"protocolVersion":"2024-11-05","padding":%q}`, padding)),
+		})
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "event: message\ndata: %s\n\n", payload)
+	}))
+	defer srv.Close()
+
+	client, err := NewHTTPClient(srv.URL, 10)
+	if err != nil {
+		t.Fatalf("NewHTTPClient: %v", err)
+	}
+	if err := client.Initialize(context.Background()); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+}
+
 // TestHTTPClient_ConcurrentSessionID exercises HTTPClient.sessionID from
 // many goroutines at once — the shape NewMCPServer actually produces
 // (multiple MCPTool instances sharing one HTTPClient), which rakitsu's own
