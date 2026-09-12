@@ -317,12 +317,30 @@ type Parameter struct {
 
 // SandboxConfig defines security sandbox configuration
 type SandboxConfig struct {
-	Type            string         `mapstructure:"type" yaml:"type"` // "local_restricted" or "docker"
-	Image           string         `mapstructure:"image,omitempty" yaml:"image,omitempty"`
-	MountWorkdir    bool           `mapstructure:"mount_workdir,omitempty" yaml:"mount_workdir,omitempty"`
-	AllowedPaths    []string       `mapstructure:"allowed_paths,omitempty" yaml:"allowed_paths,omitempty"`
-	NetworkIsolated bool           `mapstructure:"network_isolated,omitempty" yaml:"network_isolated,omitempty"`
-	ResourceLimits  ResourceLimits `mapstructure:"resource_limits,omitempty" yaml:"resource_limits,omitempty"`
+	Type         string   `mapstructure:"type" yaml:"type"` // "local_restricted" or "docker"
+	Image        string   `mapstructure:"image,omitempty" yaml:"image,omitempty"`
+	MountWorkdir bool     `mapstructure:"mount_workdir,omitempty" yaml:"mount_workdir,omitempty"`
+	AllowedPaths []string `mapstructure:"allowed_paths,omitempty" yaml:"allowed_paths,omitempty"`
+	// NetworkIsolated is kept for backward compatibility: true always maps
+	// to --network none. It does nothing else — the docker sandbox network
+	// defaults to none regardless (see AllowNetwork).
+	NetworkIsolated bool `mapstructure:"network_isolated,omitempty" yaml:"network_isolated,omitempty"`
+	// AllowNetwork opts a docker-sandboxed command into network access
+	// (skips --network none). Default is no network — a footgun a
+	// container shouldn't need for most cli tools (linters, formatters,
+	// interpreters), and the safer default when the config wasn't written
+	// with network exposure in mind.
+	AllowNetwork bool `mapstructure:"allow_network,omitempty" yaml:"allow_network,omitempty"`
+	// MountWorkdirWritable makes the mount_workdir bind mount read-write.
+	// Default is read-only: a command that only needs to read the
+	// workdir (most linters, test runners) can't also modify or delete
+	// files there just because MountWorkdir was set for read access.
+	MountWorkdirWritable bool `mapstructure:"mount_workdir_writable,omitempty" yaml:"mount_workdir_writable,omitempty"`
+	// User sets the docker "--user" the command runs as, "uid:gid" form.
+	// Defaults to 65534:65534 (nobody:nogroup) when unset, so a container
+	// escape or a compromised tool doesn't get root inside the container.
+	User           string         `mapstructure:"user,omitempty" yaml:"user,omitempty"`
+	ResourceLimits ResourceLimits `mapstructure:"resource_limits,omitempty" yaml:"resource_limits,omitempty"`
 }
 
 // ResourceLimits defines resource constraints for sandboxed execution
@@ -337,6 +355,12 @@ type ResourceLimits struct {
 	// `... [truncated N bytes]` marker so the agent can see that data
 	// was elided rather than silently losing context.
 	MaxOutputBytes int `mapstructure:"max_output_bytes,omitempty" yaml:"max_output_bytes,omitempty"`
+	// PidsLimit caps the number of processes/threads a docker-sandboxed
+	// command's container can create (docker run --pids-limit), a floor
+	// against a fork bomb or runaway subprocess spawn. When 0, the docker
+	// sandbox applies a conservative default (see
+	// internal/tools/cli.DefaultPidsLimit). Set to -1 to disable the cap.
+	PidsLimit int `mapstructure:"pids_limit,omitempty" yaml:"pids_limit,omitempty"`
 }
 
 // SkillDefinition defines a reusable skill template

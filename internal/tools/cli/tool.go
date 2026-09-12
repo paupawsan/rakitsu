@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -642,6 +643,17 @@ func (t *Tool) maxOutputBytes() int {
 	return t.sandbox.ResourceLimits.MaxOutputBytes
 }
 
+// DefaultPidsLimit caps the number of processes/threads a docker-sandboxed
+// container can create when the config leaves
+// sandbox.resource_limits.pids_limit unset (0) — a floor against a fork
+// bomb or runaway subprocess spawn. Set pids_limit to -1 to disable it.
+const DefaultPidsLimit = 128
+
+// DefaultDockerUser is the docker "--user" applied when sandbox.user is
+// unset: nobody:nogroup, so a container escape or compromised tool
+// doesn't get root inside the container.
+const DefaultDockerUser = "65534:65534"
+
 // buildDockerArgs constructs the "docker run" argument list for cmd under
 // sandbox. Split out from executeInDocker so the hardening flags below are
 // unit-testable without actually invoking Docker.
@@ -652,14 +664,41 @@ func buildDockerArgs(sandbox *config.SandboxConfig, cmd []string) []string {
 	// are writable. --tmpfs gives commands that need scratch space (compilers,
 	// package managers, etc.) somewhere to write without punching a hole in
 	// the read-only root. --security-opt=no-new-privileges blocks setuid/
-	// setgid privilege escalation inside the container.
+	// setgid privilege escalation inside the container. --cap-drop=ALL drops
+	// every Linux capability (CAP_NET_RAW, CAP_SYS_ADMIN, etc.) the
+	// container's root would otherwise retain even without host root.
 	dockerCmd = append(dockerCmd, "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m")
 	dockerCmd = append(dockerCmd, "--security-opt", "no-new-privileges")
+	dockerCmd = append(dockerCmd, "--cap-drop", "ALL")
 
-	// Add working directory mount
+	// Run as an unprivileged user inside the container by default, so a
+	// container escape or a compromised tool doesn't come out as root.
+	user := sandbox.User
+	if user == "" {
+		user = DefaultDockerUser
+	}
+	dockerCmd = append(dockerCmd, "--user", user)
+
+	// Cap process/thread count as a floor against a fork bomb or runaway
+	// subprocess spawn. -1 opts out.
+	pidsLimit := sandbox.ResourceLimits.PidsLimit
+	if pidsLimit == 0 {
+		pidsLimit = DefaultPidsLimit
+	}
+	if pidsLimit > 0 {
+		dockerCmd = append(dockerCmd, "--pids-limit", strconv.Itoa(pidsLimit))
+	}
+
+	// Add working directory mount. Read-only by default: a command that
+	// only needs to read the workdir (most linters, test runners) can't
+	// also modify or delete files there just because MountWorkdir was set.
 	if sandbox.MountWorkdir {
 		cwd, _ := os.Getwd()
-		dockerCmd = append(dockerCmd, "-v", cwd+":/workspace")
+		mount := cwd + ":/workspace"
+		if !sandbox.MountWorkdirWritable {
+			mount += ":ro"
+		}
+		dockerCmd = append(dockerCmd, "-v", mount)
 		dockerCmd = append(dockerCmd, "-w", "/workspace")
 	}
 
@@ -671,8 +710,14 @@ func buildDockerArgs(sandbox *config.SandboxConfig, cmd []string) []string {
 		dockerCmd = append(dockerCmd, "--memory", sandbox.ResourceLimits.MemoryLimit)
 	}
 
-	// Network isolation
-	if sandbox.NetworkIsolated {
+	// No network by default — most cli tools (linters, formatters,
+	// interpreters running trusted config-authored commands) don't need
+	// it, and a container that can't reach the network can't exfiltrate
+	// or phone home even if the command running inside it turns out
+	// hostile. AllowNetwork opts back in explicitly; the legacy
+	// NetworkIsolated=true is equivalent to the default (kept so existing
+	// configs setting it keep working unchanged).
+	if !sandbox.AllowNetwork {
 		dockerCmd = append(dockerCmd, "--network", "none")
 	}
 

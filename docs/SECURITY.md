@@ -70,7 +70,10 @@ the only mode that provides process isolation.
 - **`fs` tools:** always set `allowed_paths` explicitly. The default is `["."]`
   — the *entire* launch directory — so a config that omits it and is launched
   near secrets can read `.env`, `.git`, credentials, etc. Point it at the
-  narrowest directory the task needs.
+  narrowest directory the task needs. `read` is also capped at 10MB by
+  default (`sandbox.resource_limits.max_output_bytes`, `-1` disables it), so a
+  huge or special file (a multi-GB log, `/dev/zero`) can't be fully buffered
+  into memory before any limit applies.
 - **`cli` tools:** keep `settings.allowed_commands` minimal. Every command you
   add is a new capability. `docker` in particular is effectively root on most
   dev machines (it can mount the host and run privileged containers).
@@ -80,12 +83,17 @@ the only mode that provides process isolation.
 
 `sandbox: { type: docker }` gives stronger isolation than `local_restricted`:
 the container's root filesystem is read-only (with a small writable `/tmp`
-for scratch space) and setuid/setgid privilege escalation is blocked
-(`--security-opt=no-new-privileges`). The mounted working directory stays
-read-write, and networking is only disabled when `network_isolated: true`
-is set. It does not yet drop Linux capabilities, run as non-root, or set a
-pids limit. Prefer it over local execution for untrusted configs, but do
-not treat it as a hardened jail.
+for scratch space), setuid/setgid privilege escalation is blocked
+(`--security-opt=no-new-privileges`), every Linux capability is dropped
+(`--cap-drop=ALL`), the container runs as an unprivileged user by default
+(`--user`, `65534:65534` unless `sandbox.user` overrides it), a process/thread
+count limit applies (`--pids-limit`, 128 by default, `sandbox.resource_limits.
+pids_limit` to change it), and the container has **no network access unless
+`allow_network: true`** is set. The mounted working directory (`mount_workdir:
+true`) is read-only unless `mount_workdir_writable: true` is also set. Prefer
+it over local execution for untrusted configs, but it is still a soft
+container, not a hardened jail — a kernel exploit or a docker misconfiguration
+elsewhere on the host is out of scope for any of the above.
 
 ## Mode 2 — the hub (`rakitsu serve`)
 
