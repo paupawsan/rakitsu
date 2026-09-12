@@ -87,9 +87,32 @@ whitespace before checking it, whether or not `argv_split` is set.
   process against a different config/workdir and escape this session's
   sandboxing. This also catches a symlink or hard link to the binary under
   an unrelated name (checked by file identity, not just the name), but not
-  a byte-for-byte copy under a different name — that has its own inode and
-  is indistinguishable from any other unknown executable without hashing
-  file contents on every `cli` call, which rakitsu deliberately doesn't do.
+  a byte-for-byte copy under a different name, or — the more realistic
+  case, since it needs no copying at all — a small wrapper script or
+  binary that isn't rakitsu in any file-identity sense but simply execs
+  the real rakitsu binary as its own action (a one-line shell script
+  reading `exec /path/to/rakitsu "$@"` is enough). Both are indistinguishable from any other
+  unknown executable without hashing file contents on every `cli` call
+  (which wouldn't even help against the wrapper, since its content
+  genuinely differs from rakitsu's), so rakitsu deliberately doesn't try.
+  **What this fix actually closes is the *free* version of
+  self-invocation** — a bare name in `allowed_commands`, or a symlink/hard
+  link, both zero-engineering-effort attacks — not every path to it. What
+  remains needs the attacker to already hold a materially stronger
+  foothold first: an interpreter already in `allowed_commands`
+  (`bash -c 'exec rakitsu ...'`, `python3 -c "os.execv('rakitsu', ...)"`)
+  or the ability to plant an arbitrary new file into an allowed command
+  path — at which point self-invocation specifically is no longer the
+  interesting problem, since either foothold already grants far more.
+  Whether that residual gap is worth closing further, and how, is left
+  as an open question rather than a solved one: no additional static,
+  pre-exec check can decide "will this arbitrary executable, once run,
+  itself exec rakitsu" without either hashing (which doesn't help here)
+  or actually tracing/containing what the child process does at
+  runtime — which is what real OS-level isolation is for, not a
+  userspace identity check. `sandbox: { type: docker }` is the answer for
+  that today; a narrower, purpose-built answer may or may not be worth
+  building later.
   The self-invocation check and the actual exec both resolve the command
   to a single, absolute path (rather than each doing their own separate,
   possibly-relative lookup) to close the window between them. **On Linux**,
