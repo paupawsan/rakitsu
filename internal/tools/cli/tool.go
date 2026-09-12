@@ -1094,6 +1094,11 @@ func buildDockerArgs(sandbox *config.SandboxConfig, cmd []string, workingDir str
 		cwd := workingDir
 		if cwd == "" {
 			cwd, _ = os.Getwd()
+		} else if abs, err := filepath.Abs(cwd); err == nil {
+			// Docker requires an absolute host path for a bind-mount source;
+			// a relative one is either rejected or read as a named volume
+			// instead of the intended directory.
+			cwd = abs
 		}
 		mount := cwd + ":/workspace"
 		if !sandbox.MountWorkdirWritable {

@@ -95,6 +95,26 @@ func TestBuildDockerArgs_MountsExplicitWorkingDir(t *testing.T) {
 	}
 }
 
+func TestBuildDockerArgs_ResolvesRelativeWorkingDir(t *testing.T) {
+	// A relative working_dir was passed straight through as the -v mount
+	// source. Docker requires an absolute host path for a bind mount, so
+	// "./project:/workspace" either failed to start the container or was
+	// read as a named volume instead of the host directory local mode uses.
+	t.Chdir(t.TempDir())
+	rel := "project"
+	if err := os.Mkdir(rel, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.Abs(rel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := buildDockerArgs(&config.SandboxConfig{Type: "docker", MountWorkdir: true}, []string{"ls"}, rel)
+	if !containsArgPair(args, "-v", func(v string) bool { return v == want+":/workspace:ro" }) {
+		t.Fatalf("want %s (resolved absolute) mounted read-only at /workspace, got %v", want, args)
+	}
+}
+
 func TestBuildDockerArgs_NoWorkingDirMountsCwd(t *testing.T) {
 	cwd, _ := os.Getwd()
 	args := buildDockerArgs(&config.SandboxConfig{Type: "docker", MountWorkdir: true}, []string{"ls"}, "")
