@@ -179,6 +179,19 @@ func (t *Tool) Execute(ctx context.Context, args map[string]interface{}) (string
 	}
 }
 
+// absAllowed returns an allowed_paths entry as an absolute path. When the
+// tool's working_dir is absolute (what `rakitsu run --workdir` sets), a
+// relative fence is anchored on it, so allowed_paths: ["."] means "the
+// workdir" rather than "wherever rakitsu was launched from". A relative
+// working_dir is itself relative to the process cwd (paupawsan/rakitsu#28),
+// so relative fences keep resolving against the cwd in that case, as before.
+func (t *Tool) absAllowed(allowed string) (string, error) {
+	if !filepath.IsAbs(allowed) && filepath.IsAbs(t.workingDir) {
+		allowed = filepath.Join(t.workingDir, allowed)
+	}
+	return filepath.Abs(allowed)
+}
+
 // isPathAllowed checks if a path is within allowed directories.
 // Resolves symlinks to prevent traversal via symlink chains.
 func (t *Tool) isPathAllowed(path string) bool {
@@ -192,7 +205,7 @@ func (t *Tool) isPathAllowed(path string) bool {
 	realPath := resolvePathWithSymlinks(absPath)
 
 	for _, allowed := range t.allowedPaths {
-		absAllowed, err := filepath.Abs(allowed)
+		absAllowed, err := t.absAllowed(allowed)
 		if err != nil {
 			continue
 		}
@@ -480,7 +493,7 @@ func (t *Tool) searchRoot(basePath string) (string, string, error) {
 	realBase := resolvePathWithSymlinks(absBase)
 	sep := string(filepath.Separator)
 	for _, allowed := range t.allowedPaths {
-		absAllowed, err := filepath.Abs(allowed)
+		absAllowed, err := t.absAllowed(allowed)
 		if err != nil {
 			continue
 		}

@@ -1569,7 +1569,7 @@ func TestBuildDockerArgs_HardensContainer(t *testing.T) {
 		MountWorkdir:    true,
 		NetworkIsolated: true,
 	}
-	args := buildDockerArgs(sandbox, []string{"echo", "hi"})
+	args := buildDockerArgs(sandbox, []string{"echo", "hi"}, "")
 
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--read-only") {
@@ -1583,13 +1583,12 @@ func TestBuildDockerArgs_HardensContainer(t *testing.T) {
 	}
 }
 
-// TestBuildDockerArgs_DefaultsHardenFurther: a bare docker sandbox config
-// used to run as root, with every Linux
+// TestBuildDockerArgs_DefaultsHardenFurther: a bare docker sandbox config used to run as root, with every Linux
 // capability, no process-count limit, an open network, and a writable
 // workdir bind mount.
 func TestBuildDockerArgs_DefaultsHardenFurther(t *testing.T) {
 	sandbox := &config.SandboxConfig{Type: "docker", MountWorkdir: true}
-	args := buildDockerArgs(sandbox, []string{"echo", "hi"})
+	args := buildDockerArgs(sandbox, []string{"echo", "hi"}, "")
 	joined := strings.Join(args, " ")
 
 	if !strings.Contains(joined, "--cap-drop ALL") {
@@ -1621,7 +1620,7 @@ func TestBuildDockerArgs_OverridesRespected(t *testing.T) {
 		User:                 "1000:1000",
 		ResourceLimits:       config.ResourceLimits{PidsLimit: -1},
 	}
-	args := buildDockerArgs(sandbox, []string{"echo", "hi"})
+	args := buildDockerArgs(sandbox, []string{"echo", "hi"}, "")
 	joined := strings.Join(args, " ")
 
 	if strings.Contains(joined, "--network none") {

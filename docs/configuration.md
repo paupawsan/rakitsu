@@ -368,9 +368,9 @@ tools:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `type` | string | Sandbox type: `local_restricted`, `docker` |
-| `image` | string | Docker image (for `docker` type) |
-| `mount_workdir` | bool | Mount working directory into container, read-only by default (see `mount_workdir_writable`) |
+| `type` | string | Sandbox type: `local_restricted` (default when empty), `docker`. Any other value is rejected at load — it no longer falls back to local execution. `docker`-only fields below are rejected on a `local_restricted` tool. |
+| `image` | string | `docker`: image to run (`alpine:latest` default). Must not start with `-`. |
+| `mount_workdir` | bool | `docker`: mount the tool's `working_dir` (process cwd if unset) at `/workspace`, read-only by default (see `mount_workdir_writable`) |
 | `mount_workdir_writable` | bool | `docker`: mount the working directory read-write instead of read-only. Needed if the command must write into the workdir (e.g. a formatter that rewrites files in place); leave off for anything that only reads it. |
 | `allowed_paths` | []string | `local_restricted`: the command runs in `allowed_paths[0]` (unless `working_dir` is set) and any argument token that resolves outside every listed directory (`../x`, absolute paths, symlinks out, `~/x` in shell payloads) is refused. An argument filter, not containment — see SECURITY.md. |
 | `network_isolated` | bool | Deprecated alias for the default (no network). Kept for backward compatibility; use `allow_network` to opt back in. |

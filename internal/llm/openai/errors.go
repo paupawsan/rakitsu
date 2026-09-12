@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 
 	openai "github.com/sashabaranov/go-openai"
 )
@@ -75,5 +76,9 @@ func wrapAPIError(prefix string, err error) error {
 	case errors.As(err, &reqErr):
 		code = reqErr.HTTPStatusCode
 	}
-	return &statusError{msg: fmt.Sprintf("%s: %s", prefix, err), code: code, param: param, err: err}
+	msg := fmt.Sprintf("%s: %s", prefix, err)
+	if strings.Contains(err.Error(), "reasoning_effort") {
+		msg += "\n  hint: this model requires an explicit reasoning_effort with tools — set `reasoning_effort: none` (or minimal/low/medium/high) on the provider in settings.providers, or per agent under model_config"
+	}
+	return &statusError{msg: msg, code: code, param: param, err: err}
 }

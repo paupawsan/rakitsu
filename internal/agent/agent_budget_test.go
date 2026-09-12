@@ -250,15 +250,26 @@ func TestStress_SharedRootGuard_ReflectionConcurrent(t *testing.T) {
 }
 
 func TestStress_SharedRootGuard_CostLimitConcurrent(t *testing.T) {
-	// Same scenario as token stress test, but using a cost limit instead.
+	// Same scenario as the token stress test, but the shared root guard has a
+	// COST limit and no token limit.
 	// pricing: $1/M input, $2/M output
-	// Each call: 30K in + 30K out = 60K tokens per Generate call
-	// Each agent: main (60K) + reflection (60K) = 120K tokens
-	// Token limit: 100K → at most ~1 agent completes; rest hit budget_exceeded.
+	// Each call: 30K in ($0.03) + 30K out ($0.06) = $0.09 per Generate call
+	// Each agent: main + reflection = $0.18
+	// Cost limit: $0.10 → the first completed call already exhausts it; every
+	// later check fails.
+	//
+	// Enforcement has two paths (see TestStress_SharedRootGuard_ReflectionConcurrent):
+	// the iteration-level check returns a partial result with a nil error, the
+	// reflection/ground-check path returns a BudgetExceededError. Which path
+	// each goroutine hits depends on scheduling, so this test asserts on the
+	// guard itself — that the shared budget was exhausted and every outcome
+	// is one of the two enforcement shapes — rather than requiring at least
+	// one goroutine to have taken the error path (that assertion
+	// failed 10/10 in isolation and flaked in CI).
 	const N = 50
 	bus := telemetry.NewEventBus(N * 8)
 
-	rootTG := NewTokenGuard(100_000, 0) // 100K token limit shared across all agents
+	rootTG := NewTokenGuard(0, 0.10) // $0.10 cost limit shared across all agents
 	rootGuard := NewCompositeGuard(nil, rootTG)
 
 	var wg sync.WaitGroup
@@ -303,8 +314,15 @@ func TestStress_SharedRootGuard_CostLimitConcurrent(t *testing.T) {
 	if total != N {
 		t.Errorf("expected %d total outcomes, got %d", N, total)
 	}
-	if budgetHit.Load() == 0 {
-		t.Error("expected at least one budget_exceeded (cost), but none occurred")
+	// The shared cost budget must be exhausted: at least one $0.09 call was
+	// recorded against a $0.10 limit by 50 agents, so a second one pushes it
+	// over, and the guard must now report that.
+	var be *BudgetExceededError
+	if err := rootTG.Check(); !errors.As(err, &be) {
+		t.Errorf("root cost guard should be exhausted after %d agents, Check() = %v (cost so far $%.2f)", N, err, rootTG.Cost())
+	}
+	if rootTG.Cost() <= rootTG.MaxCost() {
+		t.Errorf("root guard cost $%.2f never exceeded the $%.2f limit", rootTG.Cost(), rootTG.MaxCost())
 	}
 }
 

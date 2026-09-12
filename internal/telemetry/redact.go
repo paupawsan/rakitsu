@@ -28,7 +28,7 @@ var sensitiveArgKey = regexp.MustCompile(`(?i)token|api[_-]?key|password|secret|
 // precision the way plain map[string]interface{} (which decodes all
 // numbers as float64) would for large integers.
 //
-// First-pass scope (see #70): TOOL_CALL_START.Arguments and
+// First-pass scope: TOOL_CALL_START.Arguments and
 // THOUGHT_END's IntendedToolCalls[*].Arguments. TOOL_CALL_END.Output/
 // .Error is free-form tool output, not a key/value map, and is out of
 // scope for this pass.

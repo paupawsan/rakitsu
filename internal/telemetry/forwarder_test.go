@@ -174,7 +174,7 @@ func TestHubClientSendsAPITokenWhenConfigured(t *testing.T) {
 	}
 }
 
-// TestForwardEvents_RedactsToolCallArguments regression-guards #70:
+// TestForwardEvents_RedactsToolCallArguments regression-guards a credential leak:
 // forwardEvents used to POST TOOL_CALL_START.Arguments verbatim to the
 // hub's /api/hub/ingest, so any credential-shaped argument (a token,
 // api_key, password, ...) reached the hub stream unredacted.
