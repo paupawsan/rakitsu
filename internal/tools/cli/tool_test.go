@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -85,6 +86,148 @@ func TestIsCommandAllowed_UnknownCommand(t *testing.T) {
 	}
 	if tool.isCommandAllowed("wget") {
 		t.Error("unlisted command 'wget' should not be allowed")
+	}
+}
+
+func TestIsCommandAllowed_SelfInvocation_BlockedEvenIfUserWhitelisted(t *testing.T) {
+	// A cli tool that re-invokes the rakitsu binary itself could point a new
+	// process at any config/workdir it likes, escaping this session's sandbox.
+	// That must be denied unconditionally, regardless of allowed_commands.
+	tool := newToolWithUserWhitelist("ls", []string{"rakitsu"})
+	if tool.isCommandAllowed("rakitsu") {
+		t.Error("'rakitsu' must never be allowed, even via user whitelist")
+	}
+	if tool.isCommandAllowed("/usr/local/bin/rakitsu") {
+		t.Error("'/usr/local/bin/rakitsu' must be blocked (base is 'rakitsu')")
+	}
+}
+
+func TestIsCommandAllowed_SelfInvocation_BlocksSymlinkUnderDifferentName(t *testing.T) {
+	// Found during review (#76): the name-only check missed a
+	// symlink (or hard link) pointed at the running binary under an
+	// unrelated name — e.g. allowed_commands: [alias] where "alias" is a
+	// symlink to rakitsu. os.Executable() in a test binary resolves to the
+	// test binary itself, so that stands in for "the running rakitsu
+	// binary" here: a symlink to it must still be blocked even though its
+	// name matches neither "rakitsu" nor os.Args[0]'s basename.
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable failed: %v", err)
+	}
+	dir := t.TempDir()
+	alias := filepath.Join(dir, "totally-unrelated-name")
+	if err := os.Symlink(self, alias); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	tool := newToolWithUserWhitelist("ls", []string{"totally-unrelated-name"})
+	if tool.isCommandAllowed("totally-unrelated-name") {
+		t.Error("a symlink to the running binary under a different name must still be blocked")
+	}
+	if tool.isCommandAllowed(alias) {
+		t.Error("the same symlink referenced by full path must still be blocked")
+	}
+}
+
+func TestExecuteLocalRestricted_ReRejectsSelfBinaryAtExecTime(t *testing.T) {
+	// Defense in depth, found during review (#76): isCommandAllowed
+	// and the actual exec call each did their own, separate PATH lookup for
+	// a bare command name, opening a window where the two could resolve to
+	// different files. executeLocalRestricted must independently re-reject
+	// a self-invocation immediately before exec, not rely solely on
+	// isCommandAllowed's earlier (and by now stale) check. Calling
+	// executeLocalRestricted directly here — bypassing isCommandAllowed
+	// entirely — proves this re-check holds on its own.
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable failed: %v", err)
+	}
+	dir := t.TempDir()
+	alias := filepath.Join(dir, "some-benign-name")
+	if err := os.Symlink(self, alias); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	tool := newTool("ls", nil)
+	_, err = tool.executeLocalRestricted(context.Background(), []string{alias})
+	if err == nil {
+		t.Fatal("expected an error executing a symlink pointed at the running binary")
+	}
+	var se *SecurityError
+	if !errors.As(err, &se) {
+		t.Errorf("expected *SecurityError, got %T: %v", err, err)
+	}
+}
+
+func TestExecuteLocalRestricted_ResolvesRelativePathToAbsoluteBeforeExec(t *testing.T) {
+	// Found during review (#76): a cli tool's command template can
+	// itself be a relative path containing a slash (e.g.
+	// `command: "./scripts/tool {{args}}"` — a realistic thing to write in
+	// a YAML config). exec.LookPath does not search PATH for such a name
+	// (it already contains a separator) and returns it UNCHANGED — still
+	// relative — with no error. Unix resolves a relative exec path against
+	// the CHILD's cwd, which execCmd.Dir changes to `dir` before the
+	// child's own argv[0] is resolved — but the self-invocation check runs
+	// in THIS process beforehand, against THIS process's cwd. Without
+	// pinning the resolved path to absolute, the check and the actual exec
+	// can inspect two different files with the same relative name: a
+	// benign one under this process's cwd (passes the check) and the
+	// running rakitsu binary under `dir` (what actually executes) — a
+	// total bypass of the self-invocation guard.
+	if runtime.GOOS == "windows" {
+		t.Skip("relies on Unix relative-exec-path resolution semantics")
+	}
+
+	parentCwd := t.TempDir()
+	childDir := t.TempDir()
+
+	// Benign target at the same relative path, under the process's own
+	// cwd — this is what a correct fix must actually execute.
+	if err := os.Mkdir(filepath.Join(parentCwd, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	benign := filepath.Join(parentCwd, "bin", "tool")
+	if err := os.WriteFile(benign, []byte("#!/bin/sh\necho BENIGN-MARKER\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The SAME relative path, but under childDir, is a symlink to the
+	// running binary — what a vulnerable version executes instead, because
+	// execCmd.Dir = childDir changes the child's cwd before its relative
+	// argv[0] is resolved.
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable failed: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(childDir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(self, filepath.Join(childDir, "bin", "tool")); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(parentCwd)
+
+	tool := newTool("bin/tool", nil) // cmd[0] already contains a slash: no PATH search, LookPath returns it as-is
+	tool.workingDir = childDir
+
+	out, err := tool.executeLocalRestricted(context.Background(), []string{"bin/tool"})
+	if err != nil {
+		t.Fatalf("expected the benign target to run without error, got: %v", err)
+	}
+	if !strings.Contains(out, "BENIGN-MARKER") {
+		t.Errorf("expected the benign target's own output, got %q — a relative-path bypass may have executed something else instead", out)
+	}
+}
+
+func TestIsCommandAllowed_SelfInvocation_BlocksRunningBinaryName(t *testing.T) {
+	// Also covers a renamed build (os.Args[0] != "rakitsu"), not just the
+	// literal name "rakitsu".
+	self := filepath.Base(os.Args[0])
+	tool := newToolWithUserWhitelist("ls", []string{self})
+	if tool.isCommandAllowed(self) {
+		t.Errorf("running binary's own name %q must never be allowed", self)
 	}
 }
 

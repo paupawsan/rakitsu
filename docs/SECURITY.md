@@ -81,7 +81,35 @@ whitespace before checking it, whether or not `argv_split` is set.
   into memory before any limit applies.
 - **`cli` tools:** keep `settings.allowed_commands` minimal. Every command you
   add is a new capability. `docker` in particular is effectively root on most
-  dev machines (it can mount the host and run privileged containers).
+  dev machines (it can mount the host and run privileged containers). The
+  running `rakitsu` binary itself is always rejected, even if you list it in
+  `allowed_commands` — a `cli` tool cannot re-invoke rakitsu to spawn a second
+  process against a different config/workdir and escape this session's
+  sandboxing. This also catches a symlink or hard link to the binary under
+  an unrelated name (checked by file identity, not just the name), but not
+  a byte-for-byte copy under a different name — that has its own inode and
+  is indistinguishable from any other unknown executable without hashing
+  file contents on every `cli` call, which rakitsu deliberately doesn't do.
+  The self-invocation check and the actual exec both resolve the command
+  to a single, absolute path (rather than each doing their own separate,
+  possibly-relative lookup) to close the window between them. **On Linux**,
+  the check-then-exec gap is closed entirely: the resolved file is opened
+  with `O_PATH` (a location-only open that needs no read permission on the
+  file — matching what exec itself needs, so a legitimately execute-only
+  command, mode `0111`, still runs), re-verified via that file descriptor's
+  own identity, then exec'd through `/proc/self/fd/N` rather than by path —
+  an open descriptor keeps referring to its original inode even if the path
+  is later replaced, so what was verified and what actually runs are
+  provably the same file, no matter what happens to the path in between.
+  **On macOS/BSD**, which have no `/proc` and no portable
+  file-descriptor-based exec, this extra step doesn't apply: the
+  self-invocation check still runs (by resolved path, as above) but a
+  narrow, classic check-then-exec race remains between that check and the
+  exec syscall, requiring an attacker with concurrent filesystem write
+  access to the exact resolved path timed to a sub-millisecond window (a
+  materially stronger position than the original gap this section
+  describes, which required nothing more than a name in
+  `allowed_commands`).
 - **Untrusted work:** use `sandbox: { type: docker }` (see below).
 
 ### Docker sandbox

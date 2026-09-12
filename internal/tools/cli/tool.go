@@ -703,6 +703,16 @@ func (t *Tool) isCommandAllowed(cmd string) bool {
 	// Get base command name
 	baseCmd := filepath.Base(cmd)
 
+	// Never allow the running binary to invoke itself, regardless of
+	// allowed_commands config. A cli tool that re-launches rakitsu can
+	// point the new process at any config/workdir it likes, escaping
+	// whatever sandboxing this session was set up with. This check is
+	// unconditional — it is not part of blockedCommands so it can't be
+	// removed by editing that map, and it runs before any whitelist.
+	if isSelfBinary(cmd) {
+		return false
+	}
+
 	// Check blocked list first (always takes precedence)
 	if blockedCommands[baseCmd] {
 		return false
@@ -715,6 +725,51 @@ func (t *Tool) isCommandAllowed(cmd string) bool {
 
 	// Check user-configured whitelist
 	return t.userWhitelist[baseCmd]
+}
+
+// isSelfBinary reports whether baseCmd names the currently running
+// executable — either literally "rakitsu" or the actual binary name
+// os.Args[0] was invoked as (covers renamed builds, e.g. "rakitsu-dev").
+func isSelfBinary(cmd string) bool {
+	baseCmd := filepath.Base(cmd)
+	if baseCmd == "rakitsu" {
+		return true
+	}
+	if len(os.Args) > 0 && baseCmd == filepath.Base(os.Args[0]) {
+		return true
+	}
+	return isSameFileAsSelf(cmd)
+}
+
+// isSameFileAsSelf resolves cmd to a real file (via a PATH lookup if it's
+// a bare name — exec.LookPath handles both cases) and compares its device
+// and inode against the currently running rakitsu binary. This is what
+// actually catches a symlink or hard link pointed at the same binary under
+// an unrelated name — the name check above alone misses it, since the
+// allowed_commands entry and the argv[0] name can both be anything the
+// config author picked. It cannot catch a byte-for-byte copy of the
+// binary under a different name: that has its own inode and is
+// indistinguishable from any other unknown executable short of hashing
+// file contents on every cli call, which this guard deliberately doesn't
+// do (see docs/SECURITY.md's residual-limitation notes).
+func isSameFileAsSelf(cmd string) bool {
+	self, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	selfInfo, err := os.Stat(self)
+	if err != nil {
+		return false
+	}
+	candidate, err := exec.LookPath(cmd)
+	if err != nil {
+		return false
+	}
+	candidateInfo, err := os.Stat(candidate)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(selfInfo, candidateInfo)
 }
 
 // executeLocalRestricted executes the command locally with restrictions
@@ -748,9 +803,58 @@ func (t *Tool) executeLocalRestricted(ctx context.Context, cmd []string) (string
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// Resolve the executable ourselves and exec that exact absolute path,
+	// rather than passing a bare name and letting exec.CommandContext
+	// perform its own, separate PATH lookup. Two independent lookups (one
+	// here for the self-invocation re-check, one inside exec.Command) open
+	// a window where each could resolve a bare name to a different file if
+	// something on PATH changes in between (found during review, right
+	// after the isSelfBinary fix above landed). An absolute
+	// path always skips exec.Command's internal lookup, so this collapses
+	// the two lookups into one. It does not eliminate the smaller, harder
+	// to close, check-then-exec gap between this os.Stat and the actual
+	// exec syscall — that would need fd-based exec, out of scope for this
+	// fix — see docs/SECURITY.md's residual-limitation notes.
+	resolved, err := exec.LookPath(cmd[0])
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve command %q: %w", cmd[0], err)
+	}
+	// exec.LookPath does not guarantee an absolute result: if PATH contains
+	// a relative directory entry, it can return a path like "bin/tool",
+	// resolved against THIS process's current working directory. Below,
+	// execCmd.Dir changes the CHILD's working directory before its argv[0]
+	// is resolved — so a relative resolved path would be checked here
+	// against one file (relative to our cwd) and executed as a different
+	// file (the same relative path, but under dir), a bypass found during
+	// review. filepath.Abs pins it to one exact file for both the check
+	// and the exec, independent of any later chdir.
+	resolved, err = filepath.Abs(resolved)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve command %q: %w", cmd[0], err)
+	}
+	if isSelfBinary(resolved) {
+		return "", &SecurityError{Command: cmd[0], Reason: "command resolves to the running rakitsu binary"}
+	}
+	cmd[0] = resolved
+
 	execCmd := exec.CommandContext(ctx, cmd[0], cmd[1:]...)
 	execCmd.Env = scrubbedEnviron()
 	execCmd.Dir = dir
+
+	// On Linux, harden further: re-verify self-identity via a file
+	// descriptor opened with O_PATH (no read permission required, unlike
+	// a normal open — matching what exec itself needs) and exec through
+	// that exact fd via /proc/self/fd, eliminating the remaining
+	// check-then-exec race between the isSelfBinary check above and the
+	// actual exec syscall. No equivalent exists on macOS/BSD (no /proc,
+	// no portable fexecve) — see docs/SECURITY.md.
+	execFile, err := execViaFD(execCmd, resolved)
+	if err != nil {
+		return "", err
+	}
+	if execFile != nil {
+		defer execFile.Close()
+	}
 
 	// Run in its own process group so a timeout kills the whole tree, not
 	// just the direct child — matters for whitelisted shell wrappers
