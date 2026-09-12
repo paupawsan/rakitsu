@@ -89,18 +89,21 @@ the only mode that provides process isolation.
   to a single, absolute path (rather than each doing their own separate,
   possibly-relative lookup) to close the window between them. **On Linux**,
   the check-then-exec gap is closed entirely: the resolved file is opened
-  and verified via that file descriptor's own identity, then exec'd through
-  `/proc/self/fd/N` rather than by path — an open descriptor keeps
-  referring to its original inode even if the path is later replaced, so
-  what was verified and what actually runs are provably the same file, no
-  matter what happens to the path in between. **On macOS/BSD**, which have
-  no `/proc` and no portable file-descriptor-based exec, the identity check
-  still runs against the open file (tighter than a bare path re-check) but
-  the final exec still goes by path — a narrow, classic check-then-exec
-  race remains there, requiring an attacker with concurrent filesystem
-  write access to the exact resolved path timed to a sub-millisecond
-  window (a materially stronger position than the original gap this
-  section describes, which required nothing more than a name in
+  with `O_PATH` (a location-only open that needs no read permission on the
+  file — matching what exec itself needs, so a legitimately execute-only
+  command, mode `0111`, still runs), re-verified via that file descriptor's
+  own identity, then exec'd through `/proc/self/fd/N` rather than by path —
+  an open descriptor keeps referring to its original inode even if the path
+  is later replaced, so what was verified and what actually runs are
+  provably the same file, no matter what happens to the path in between.
+  **On macOS/BSD**, which have no `/proc` and no portable
+  file-descriptor-based exec, this extra step doesn't apply: the
+  self-invocation check still runs (by resolved path, as above) but a
+  narrow, classic check-then-exec race remains between that check and the
+  exec syscall, requiring an attacker with concurrent filesystem write
+  access to the exact resolved path timed to a sub-millisecond window (a
+  materially stronger position than the original gap this section
+  describes, which required nothing more than a name in
   `allowed_commands`).
 - **Untrusted work:** use `sandbox: { type: docker }` (see below).
 

@@ -566,37 +566,29 @@ func (t *Tool) executeLocalRestricted(ctx context.Context, cmd []string) (string
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve command %q: %w", cmd[0], err)
 	}
-	// Open the resolved file now and verify self-identity on the live file
-	// descriptor's own Stat, rather than a second path-based os.Stat: an
-	// open fd keeps referring to its original inode even if the path is
-	// later replaced, so from this point on the file we verified and the
-	// file behind this fd are provably the same object — closing the
-	// verify-then-open race a path-only check still has. On Linux,
-	// execViaFD (below) goes one step further and execs THROUGH this exact
-	// fd via /proc/self/fd, eliminating the remaining check-then-exec race
-	// entirely; other platforms have no equivalent to /proc and fall back
-	// to exec-by-path, still checked against this fd's identity but unable
-	// to close that last window — see docs/SECURITY.md.
-	f, err := os.Open(resolved)
-	if err != nil {
-		return "", fmt.Errorf("cannot open command %q: %w", resolved, err)
-	}
-	defer f.Close()
-	fdInfo, err := f.Stat()
-	if err != nil {
-		return "", fmt.Errorf("cannot stat command %q: %w", resolved, err)
-	}
-	if self, selfErr := os.Executable(); selfErr == nil {
-		if selfInfo, statErr := os.Stat(self); statErr == nil && os.SameFile(selfInfo, fdInfo) {
-			return "", &SecurityError{Command: cmd[0], Reason: "command resolves to the running rakitsu binary"}
-		}
+	if isSelfBinary(resolved) {
+		return "", &SecurityError{Command: cmd[0], Reason: "command resolves to the running rakitsu binary"}
 	}
 	cmd[0] = resolved
 
 	execCmd := exec.CommandContext(ctx, cmd[0], cmd[1:]...)
 	execCmd.Env = scrubbedEnviron()
 	execCmd.Dir = dir
-	execViaFD(execCmd, f)
+
+	// On Linux, harden further: re-verify self-identity via a file
+	// descriptor opened with O_PATH (no read permission required, unlike
+	// a normal open — matching what exec itself needs) and exec through
+	// that exact fd via /proc/self/fd, eliminating the remaining
+	// check-then-exec race between the isSelfBinary check above and the
+	// actual exec syscall. No equivalent exists on macOS/BSD (no /proc,
+	// no portable fexecve) — see docs/SECURITY.md.
+	execFile, err := execViaFD(execCmd, resolved)
+	if err != nil {
+		return "", err
+	}
+	if execFile != nil {
+		defer execFile.Close()
+	}
 
 	// Run in its own process group so a timeout kills the whole tree, not
 	// just the direct child — matters for whitelisted shell wrappers
