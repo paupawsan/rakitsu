@@ -682,11 +682,11 @@ func Load(configPath string) (*Config, error) {
 	// api_key). Runs after auto-discovery so tools loaded from conventional
 	// directories get expanded too, not just inline ones.
 	for i := range config.Tools {
-		config.Tools[i].APIKey = expandEnvVar(config.Tools[i].APIKey)
+		expandToolDefEnvVars(&config.Tools[i])
 	}
 	for ai := range config.Agents {
 		for ti := range config.Agents[ai].ToolsInline {
-			config.Agents[ai].ToolsInline[ti].APIKey = expandEnvVar(config.Agents[ai].ToolsInline[ti].APIKey)
+			expandToolDefEnvVars(&config.Agents[ai].ToolsInline[ti])
 		}
 	}
 
@@ -750,6 +750,18 @@ func expandEnvVar(v string) string {
 		return lookupEnv(envVar)
 	}
 	return v
+}
+
+// expandToolDefEnvVars expands ${VAR} / ${VAR:-default} references in a
+// ToolDefinition's credential and mcp_server connection fields (api_key,
+// url, command, args) in place.
+func expandToolDefEnvVars(t *ToolDefinition) {
+	t.APIKey = expandEnvVar(t.APIKey)
+	t.URL = expandEnvVar(t.URL)
+	t.Command = expandEnvVar(t.Command)
+	for i := range t.Args {
+		t.Args[i] = expandEnvVar(t.Args[i])
+	}
 }
 
 // getEnvWithDefault gets an environment variable with a default value

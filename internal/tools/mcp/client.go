@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -331,7 +332,11 @@ func (c *HTTPClient) send(ctx context.Context, method string, params interface{}
 		return rpcResponse{}, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "application/json")
+	// Streamable-HTTP MCP servers require the client to accept both plain
+	// JSON and SSE responses (MCP spec 2024-11-05); some reject the request
+	// with 406 if text/event-stream is missing, even when they end up
+	// responding with plain JSON.
+	httpReq.Header.Set("Accept", "application/json, text/event-stream")
 	c.mu.Lock()
 	sessionID := c.sessionID
 	c.mu.Unlock()
@@ -356,11 +361,38 @@ func (c *HTTPClient) send(ctx context.Context, method string, params interface{}
 		c.mu.Unlock()
 	}
 
+	respBody, err := decodeMCPBody(httpResp)
+	if err != nil {
+		return rpcResponse{}, fmt.Errorf("mcp http decode: %w", err)
+	}
 	var resp rpcResponse
-	if err := json.NewDecoder(io.LimitReader(httpResp.Body, 1<<20)).Decode(&resp); err != nil {
+	if err := json.Unmarshal(respBody, &resp); err != nil {
 		return rpcResponse{}, fmt.Errorf("mcp http decode: %w", err)
 	}
 	return resp, nil
+}
+
+// decodeMCPBody reads an MCP HTTP response body, transparently unwrapping
+// an SSE-framed ("text/event-stream") response down to the JSON payload of
+// its first "data:" event. A plain "application/json" response is returned
+// as-is.
+func decodeMCPBody(httpResp *http.Response) ([]byte, error) {
+	limited := io.LimitReader(httpResp.Body, 1<<20)
+	if !strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream") {
+		return io.ReadAll(limited)
+	}
+	scanner := bufio.NewScanner(limited)
+	scanner.Buffer(make([]byte, 4096), 1<<20) // allow a "data:" line up to the same 1 MiB response cap
+	for scanner.Scan() {
+		line := scanner.Text()
+		if data, ok := strings.CutPrefix(line, "data:"); ok {
+			return []byte(strings.TrimSpace(data)), nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return nil, fmt.Errorf("no data event in SSE response")
 }
 
 // Initialize sends the MCP initialize handshake.
@@ -382,6 +414,7 @@ func (c *HTTPClient) Initialize(ctx context.Context) error {
 	b, _ := json.Marshal(notif)
 	httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(b))
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json, text/event-stream")
 	c.mu.Lock()
 	sessionID := c.sessionID
 	c.mu.Unlock()
