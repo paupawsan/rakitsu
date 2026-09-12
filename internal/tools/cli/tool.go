@@ -4,10 +4,12 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -367,45 +369,304 @@ func (t *Tool) Execute(ctx context.Context, args map[string]interface{}) (string
 	}
 }
 
+// maxPlaceholderResolutionPasses bounds how many times resolvePlaceholders
+// re-scans a string for further {{...}} patterns. Without a bound, a
+// self-referential value — e.g. a caller passing the literal string
+// "{{name}}" as the VALUE of parameter "name" — never changes on
+// replacement, so the re-scan condition never goes false: an unbounded hang
+// reachable via any caller/agent-controlled tool argument, not just a
+// config-authoring mistake. Found by review on paupawsan/rakitsu#75 and
+// verified independently (both the pre-existing per-part loop this
+// replaces and the new resolvePlaceholders helper hung on this input). 32
+// is far beyond any realistic nesting depth for this feature.
+const maxPlaceholderResolutionPasses = 32
+
+// maxPlaceholderResolutionLength bounds how large s may grow during
+// resolvePlaceholders. The pass bound above stops an infinite loop but not
+// an EXPANDING one: a value like {{name}} = "{{name}}{{name}}" doubles the
+// number of matched placeholders every pass (strings.Replace(-1) replaces
+// every occurrence at once), so within maxPlaceholderResolutionPasses the
+// string would balloon past any reasonable size long before the pass bound
+// is reached — a caller-controlled memory-exhaustion DoS, not just a hang.
+// Checked as a PROJECTED size before each replace, so the oversized string
+// is never actually allocated. 64 KiB is far beyond any realistic argv
+// value for a cli tool. Found by review on paupawsan/rakitsu#75, verified
+// independently with a timeout-guarded reproduction (didn't finish in 5s).
+const maxPlaceholderResolutionLength = 1 << 16
+
+// resolvePlaceholders repeatedly substitutes every {{name}} in s that has a
+// matching entry in args, re-scanning the result after each substitution —
+// so a value that itself contains {{other_param}} syntax gets resolved too,
+// not just the first level (also used for buildCommand's own per-part
+// resolution below, replacing what used to be separate, duplicated inline
+// logic there). Stops as soon as it hits a {{...}} with no matching entry
+// in args, leaving it literal, so a template variable the caller forgot to
+// pass doesn't cause a hang. Bounded by maxPlaceholderResolutionPasses and
+// maxPlaceholderResolutionLength as independent safeguards against a
+// self-referential, expanding, or otherwise non-terminating/unbounded
+// value — either bound leaves the rest of s unresolved rather than erroring,
+// matching the existing "unrecognized placeholder" graceful-degradation
+// behavior.
+//
+// Replaces the exact matched substring — start..end+2, preserving any
+// internal whitespace like "{{ name }}" — rather than a reconstructed
+// "{{"+trimmed-name+"}}". Reconstructing it can search for a string that
+// never actually occurs when the placeholder has internal whitespace
+// (`{{ name }}` written with spaces), making the replacement a silent no-op
+// and hanging regardless of the iteration bound's intent — also found by
+// the same review, also verified independently.
+// referencesPlaceholder reports whether part contains a {{...}} placeholder
+// whose TRIMMED name equals name — used by buildCommand to skip appending a
+// parameter a second time as --name=val when it was already substituted
+// into the command template. Scans for each {{...}} occurrence the same way
+// resolvePlaceholders does, rather than searching for the literal substring
+// "{{"+name+"}}", so a placeholder written with internal whitespace (e.g.
+// {{ name }}) is still recognized as referencing the same parameter. Found
+// by review while preparing this fix for its public port: a command like
+// `sh -c 'echo {{ name }}'` correctly substitutes "name" via
+// resolvePlaceholders' raw-match resolution, but the literal-substring
+// check couldn't see it was already consumed, so "name" landed twice —
+// once in the substituted script, once again as a redundant --name=val.
+func referencesPlaceholder(part, name string) bool {
+	for {
+		start := strings.Index(part, "{{")
+		if start < 0 {
+			return false
+		}
+		relEnd := strings.Index(part[start:], "}}")
+		if relEnd < 0 {
+			return false
+		}
+		end := start + relEnd
+		if strings.TrimSpace(part[start+2:end]) == name {
+			return true
+		}
+		part = part[end+2:]
+	}
+}
+
+// errPlaceholderResolutionBoundExceeded is returned by resolvePlaceholders
+// when a safety bound (size cap or pass count) stops resolution before it
+// would otherwise complete — distinct from the two INTENTIONAL, no-error
+// stopping points (no more {{...}} left, or a placeholder with no matching
+// entry in args, both of which correctly leave the remaining text literal).
+// Found by review while preparing this fix chain's public port: hitting a
+// bound silently left the literal, unresolved {{name}} text in the built
+// command with no error at all, so a legitimate value merely large enough
+// to trip the cap (a diff, a JSON payload, file contents well over 64 KiB)
+// silently executed the WRONG command — the literal placeholder text —
+// instead of failing loudly. That's a materially different situation from
+// "config author forgot to pass this parameter" and must not be treated the
+// same way.
+var errPlaceholderResolutionBoundExceeded = errors.New("placeholder resolution exceeded a safety bound")
+
+func resolvePlaceholders(s string, args map[string]interface{}) (string, error) {
+	for i := 0; i < maxPlaceholderResolutionPasses; i++ {
+		start := strings.Index(s, "{{")
+		if start < 0 {
+			return s, nil
+		}
+		relEnd := strings.Index(s[start:], "}}")
+		if relEnd < 0 {
+			return s, nil // malformed; bail to avoid infinite loop
+		}
+		end := start + relEnd
+		raw := s[start : end+2]
+		placeholder := strings.TrimSpace(s[start+2 : end])
+		val, ok := args[placeholder]
+		if !ok {
+			return s, nil
+		}
+		valStr := fmt.Sprintf("%v", val)
+		count := strings.Count(s, raw)
+		// Bound each factor independently before multiplying, so the
+		// product itself is capped at maxPlaceholderResolutionLength^2
+		// (currently 65536^2 ≈ 4.3e9) — this fits int64 with room to
+		// spare on every platform, but on a 32-bit int build (int is
+		// 32 bits) it can still exceed math.MaxInt32, so the projected
+		// size is computed with explicit int64 arithmetic rather than
+		// relying on the platform's native int width. Found by review
+		// on paupawsan/rakitsu#75.
+		if count > maxPlaceholderResolutionLength || len(valStr) > maxPlaceholderResolutionLength || len(s) > maxPlaceholderResolutionLength {
+			return s, errPlaceholderResolutionBoundExceeded
+		}
+		if projected := int64(len(s)) + int64(count)*int64(len(valStr)-len(raw)); projected > int64(maxPlaceholderResolutionLength) {
+			return s, errPlaceholderResolutionBoundExceeded
+		}
+		s = strings.Replace(s, raw, valStr, -1)
+	}
+	// Ran out of passes. Whatever {{...}} remains needs the SAME
+	// classification the in-loop checks above already do — malformed, or
+	// unrecognized (no matching entry in args) — before concluding this was
+	// actually a bound trip. Naively treating any leftover "{{" as a bound
+	// trip is wrong: a placeholder chain can need exactly
+	// maxPlaceholderResolutionPasses steps to unwind down to a genuinely
+	// unrecognized final placeholder (nothing malicious, just a few links
+	// too many to also resolve the graceful "unrecognized" check on the
+	// same pass) — that's the SAME pre-existing, intentional no-error case
+	// as always, only reached one iteration later than the loop allows.
+	//
+	// Scans EVERY remaining {{...}} occurrence, not just the leftmost one:
+	// found by a second review round — a single substitution on the FINAL
+	// pass can introduce more than one new placeholder at once (e.g. a
+	// value containing both an unrecognized placeholder and a legitimately
+	// resolvable one). Checking only the first occurrence would see the
+	// unrecognized one, conclude "graceful stop", and miss that a
+	// genuinely resolvable placeholder sitting right after it was cut off
+	// by the pass cap. Only once NONE of the remaining placeholders are
+	// recognized do we call this the same pre-existing graceful stop as
+	// always; finding even one recognized, well-formed placeholder means a
+	// bound was genuinely exceeded. Both mis-classifications verified
+	// independently with reproduction tests before fixing.
+	rest := s
+	for {
+		start := strings.Index(rest, "{{")
+		if start < 0 {
+			return s, nil
+		}
+		relEnd := strings.Index(rest[start:], "}}")
+		if relEnd < 0 {
+			return s, nil // malformed tail; same graceful stop as the in-loop check
+		}
+		end := start + relEnd
+		placeholder := strings.TrimSpace(rest[start+2 : end])
+		if _, ok := args[placeholder]; ok {
+			return s, errPlaceholderResolutionBoundExceeded
+		}
+		rest = rest[end+2:]
+	}
+}
+
 // buildCommand builds the full command with arguments
 func (t *Tool) buildCommand(args map[string]interface{}) ([]string, error) {
-	// Start with base command
-	cmd := make([]string, len(t.command))
-	copy(cmd, t.command)
-
 	// If command has placeholders, substitute them.
 	// IMPORTANT: a single command part may contain multiple distinct
 	// placeholders (e.g. a shell payload like `sh -c 'grep "{{pattern}}" "{{file}}"'`).
 	// Iterate until no more recognized placeholders remain, not just once.
 	// See New-B-cli-multi-placeholder in STABILITY-gate.md for the original
 	// regression (dogfood-01 search tool, 2026-04-05).
-	for i, part := range cmd {
-		for strings.Contains(part, "{{") && strings.Contains(part, "}}") {
-			start := strings.Index(part, "{{") + 2
-			end := strings.Index(part, "}}")
-			if end <= start {
-				break // malformed; bail to avoid infinite loop
-			}
-			placeholder := strings.TrimSpace(part[start:end])
+	//
+	// Special case: when a command part IS the whole placeholder (e.g.
+	// `command: "gh {{args}}"`) AND that parameter opts in via
+	// `argv_split: true`, the substituted value is shell-aware split into
+	// multiple argv tokens instead of inserted as one. This is opt-in
+	// (default false) rather than auto-detected from the command's shape,
+	// because the same shape (`binary {{param}}`, no surrounding text) is
+	// genuinely ambiguous: `gh {{args}}` with a free-text argument string
+	// wants multiple tokens, but `python3 -c {{code}}` wants its whole value
+	// as ONE argument — there's no way to tell those apart by looking at the
+	// template alone. See config.Parameter.ArgvSplit (a `gh` tool call
+	// landed as a single unparseable argv element and failed every call).
+	//
+	// argv_split must never apply to a shell wrapper's `-c` payload slot
+	// (e.g. `command: "sh -c {{args}}"`, index 2 after splitCommand — the
+	// identical shape to the already-supported `sh -c '{{args}}'`, since
+	// splitCommand's quote-stripping makes the two textually equivalent
+	// once there are no spaces inside the placeholder itself). Splitting
+	// that slot would hand `sh -c` only the value's first word as its
+	// script and turn every subsequent word into a $0/$1/... positional
+	// parameter instead of script content — and the B20 blocklist lint
+	// below only ever inspects cmd[2], so it would silently validate just
+	// that truncated first word while the real (also truncated) script
+	// runs unchecked. Reject this combination outright rather than
+	// mis-executing it.
+	//
+	// filepath.Base normalizes a full-path wrapper (`/bin/sh -c {{args}}`)
+	// to the same detection as a bare `sh`/`bash` — a review-round-2 gap in
+	// the first version of this guard, applied to the pre-existing B20 lint
+	// trigger below too. A re-invocation wrapper (`env sh -c {{args}}`, a
+	// different index shape entirely) is deliberately NOT covered here: the
+	// B20 blocklist lint itself only ever fires when cmd[0] is literally
+	// sh/bash (see below), so that shape already has no B20 protection
+	// regardless of argv_split — extending only this guard to cover it
+	// would be a false sense of safety, not a real fix. That's a
+	// pre-existing, broader gap in the lint's own detection scope, not
+	// something argv_split introduces or this fix is scoped to solve.
+	//
+	// hasShellWrapperShape is a template-level structural check only (does
+	// this command have at least 3 parts, i.e. could index 2 even be a
+	// `-c` payload slot). Deliberately NOT combined with the sh/bash name
+	// check here: a templated interpreter (`command: "{{shell}} -c
+	// {{args}}"`) has t.command[0] == "{{shell}}" — never literally
+	// "sh"/"bash" — so checking the raw template would never catch this
+	// shape even when shell resolves to "sh" at runtime, silently letting
+	// argv_split through onto what is, after substitution, exactly the
+	// dangerous slot this guard exists to reject. The actual sh/bash
+	// comparison happens below, inside the loop, against cmd[0]/cmd[1] —
+	// the ALREADY-SUBSTITUTED values — once i reaches 2 (by which point
+	// both have been resolved and appended in prior loop iterations).
+	hasShellWrapperShape := len(t.command) >= 3
 
-			val, ok := args[placeholder]
-			if !ok {
-				// Unrecognized placeholder — stop so we don't infinite-loop
-				// on a template variable the caller forgot to pass.
-				break
+	var cmd []string
+	for i, part := range t.command {
+		wholePartPlaceholder := ""
+		if strings.HasPrefix(part, "{{") && strings.HasSuffix(part, "}}") &&
+			strings.Count(part, "{{") == 1 {
+			name := strings.TrimSpace(part[2 : len(part)-2])
+			if t.parameters[name].ArgvSplit {
+				isShellWrapperPayloadSlot := hasShellWrapperShape && i == 2 && len(cmd) >= 2 &&
+					(filepath.Base(cmd[0]) == "sh" || filepath.Base(cmd[0]) == "bash") && cmd[1] == "-c"
+				if isShellWrapperPayloadSlot {
+					return nil, fmt.Errorf(
+						"parameter %q has argv_split: true but is the sh -c/bash -c script argument (resolved command %q) — "+
+							"its value must stay a single token; remove argv_split or restructure the command",
+						name, strings.Join(cmd, " "))
+				}
+				wholePartPlaceholder = name
 			}
-			part = strings.Replace(part, "{{"+placeholder+"}}", fmt.Sprintf("%v", val), -1)
 		}
-		cmd[i] = part
+
+		// A part eligible for argv_split is, by construction, exactly one
+		// placeholder and nothing else — so there's exactly one lookup to
+		// do, no scanning loop needed. If the value isn't in args, fall
+		// through to the general resolvePlaceholders call below, which
+		// leaves an unrecognized placeholder as literal text (same
+		// behavior as always).
+		if wholePartPlaceholder != "" {
+			if val, ok := args[wholePartPlaceholder]; ok {
+				resolved, err := resolvePlaceholders(fmt.Sprintf("%v", val), args)
+				if err != nil {
+					return nil, fmt.Errorf("parameter %q: %w", wholePartPlaceholder, err)
+				}
+				cmd = append(cmd, splitCommand(resolved)...)
+				continue
+			}
+		}
+
+		// resolvePlaceholders also always appends exactly one cmd entry per
+		// command part — including a part that substitutes down to a
+		// legitimately empty string (e.g. `{{value}}` with value: "") or
+		// one left untouched because it has no recognized placeholder at
+		// all — matching the pre-existing behavior this replaces.
+		resolved, err := resolvePlaceholders(part, args)
+		if err != nil {
+			return nil, fmt.Errorf("command part %q: %w", part, err)
+		}
+		cmd = append(cmd, resolved)
 	}
 
-	// Add additional arguments
-	for name, param := range t.parameters {
+	// Add additional arguments. t.parameters is a map, whose iteration order
+	// Go randomizes on every run — iterating it directly would append
+	// non-templated `--name=val` flags in a different order each call,
+	// making the resulting argv (and any test/log asserting on it)
+	// nondeterministic. Sort names for a stable, reproducible argv.
+	names := make([]string, 0, len(t.parameters))
+	for name := range t.parameters {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		param := t.parameters[name]
 		if val, ok := args[name]; ok {
-			// Skip if it's a placeholder that was already substituted
+			// Skip if it's a placeholder that was already substituted.
+			// Uses referencesPlaceholder (trims each {{...}} name before
+			// comparing) rather than a literal "{{"+name+"}}" substring
+			// search, so a whitespace-padded placeholder like {{ name }}
+			// is still recognized as already consumed and doesn't also
+			// get appended as a redundant --name=val.
 			isPlaceholder := false
 			for _, part := range t.command {
-				if strings.Contains(part, "{{"+name+"}}") {
+				if referencesPlaceholder(part, name) {
 					isPlaceholder = true
 					break
 				}
@@ -423,7 +684,12 @@ func (t *Tool) buildCommand(args map[string]interface{}) ([]string, error) {
 	// payload for standalone invocations of blocked commands. This catches
 	// obvious cases like `log; rm -rf /` without blocking legitimate uses
 	// like `log --grep "arm64"` (where "rm" is only a substring).
-	if len(cmd) >= 3 && (cmd[0] == "sh" || cmd[0] == "bash") && cmd[1] == "-c" {
+	//
+	// filepath.Base so a full-path wrapper (`/bin/sh -c '...'`,
+	// `/usr/bin/bash -c '...'`) is recognized the same as a bare `sh`/`bash`
+	// — same normalization isCommandAllowed already applies, and the same
+	// detection the argv_split guard above uses.
+	if len(cmd) >= 3 && (filepath.Base(cmd[0]) == "sh" || filepath.Base(cmd[0]) == "bash") && cmd[1] == "-c" {
 		if err := lintShellPayload(cmd[2]); err != nil {
 			return nil, err
 		}
