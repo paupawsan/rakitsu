@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/paupawsan/rakitsu/internal/config"
 )
 
@@ -272,11 +273,14 @@ func NewTool(def *config.ToolDefinition, allowedCommands ...[]string) *Tool {
 		cmdParts = splitCommand(def.Command)
 	}
 
-	// Default sandbox config
-	sandbox := def.Sandbox
-	if sandbox == nil {
-		sandbox = &config.SandboxConfig{
-			Type: "local_restricted",
+	// Default sandbox config. Copy the caller's struct so normalizing the
+	// type here never mutates the loaded config.
+	sandbox := &config.SandboxConfig{Type: "local_restricted"}
+	if def.Sandbox != nil {
+		copied := *def.Sandbox
+		sandbox = &copied
+		if sandbox.Type == "" {
+			sandbox.Type = "local_restricted"
 		}
 	}
 
@@ -358,14 +362,25 @@ func (t *Tool) Execute(ctx context.Context, args map[string]interface{}) (string
 		}
 	}
 
-	// 3. Execute based on sandbox type
+	// 3. Refuse a sandbox whose settings would silently lose their meaning.
+	// Config loading already checks this; tools built directly do not go
+	// through it.
+	if err := config.ValidateSandbox(t.sandbox); err != nil {
+		return "", &SecurityError{Command: fullCmd[0], Reason: err.Error()}
+	}
+
+	// 4. Execute based on sandbox type. Fail closed: an unknown type used to
+	// fall through to host execution, the least isolated mode.
 	switch t.sandbox.Type {
 	case "docker":
 		return t.executeInDocker(ctx, fullCmd)
 	case "local_restricted":
-		fallthrough
-	default:
 		return t.executeLocalRestricted(ctx, fullCmd)
+	default:
+		return "", &SecurityError{
+			Command: fullCmd[0],
+			Reason:  fmt.Sprintf("unknown sandbox type %q (use local_restricted or docker)", t.sandbox.Type),
+		}
 	}
 }
 
@@ -555,8 +570,9 @@ func (t *Tool) buildCommand(args map[string]interface{}) ([]string, error) {
 	// genuinely ambiguous: `gh {{args}}` with a free-text argument string
 	// wants multiple tokens, but `python3 -c {{code}}` wants its whole value
 	// as ONE argument — there's no way to tell those apart by looking at the
-	// template alone. See config.Parameter.ArgvSplit (a `gh` tool call
-	// landed as a single unparseable argv element and failed every call).
+	// template alone. See config.Parameter.ArgvSplit (a gh tool
+	// in a dev-agent-system config landed as a single unparseable argv
+	// element and failed every call).
 	//
 	// argv_split must never apply to a shell wrapper's `-c` payload slot
 	// (e.g. `command: "sh -c {{args}}"`, index 2 after splitCommand — the
@@ -687,8 +703,8 @@ func (t *Tool) buildCommand(args map[string]interface{}) ([]string, error) {
 	//
 	// filepath.Base so a full-path wrapper (`/bin/sh -c '...'`,
 	// `/usr/bin/bash -c '...'`) is recognized the same as a bare `sh`/`bash`
-	// — same normalization isCommandAllowed already applies, and the same
-	// detection the argv_split guard above uses.
+	// — same normalization isCommandAllowed already applies. Found alongside
+	// the argv_split guard (which shares this exact detection).
 	if len(cmd) >= 3 && (filepath.Base(cmd[0]) == "sh" || filepath.Base(cmd[0]) == "bash") && cmd[1] == "-c" {
 		if err := lintShellPayload(cmd[2]); err != nil {
 			return nil, err
@@ -808,8 +824,8 @@ func (t *Tool) executeLocalRestricted(ctx context.Context, cmd []string) (string
 	// perform its own, separate PATH lookup. Two independent lookups (one
 	// here for the self-invocation re-check, one inside exec.Command) open
 	// a window where each could resolve a bare name to a different file if
-	// something on PATH changes in between (found during review, right
-	// after the isSelfBinary fix above landed). An absolute
+	// something on PATH changes in between (found by automated review
+	// right after the isSelfBinary fix above landed). An absolute
 	// path always skips exec.Command's internal lookup, so this collapses
 	// the two lookups into one. It does not eliminate the smaller, harder
 	// to close, check-then-exec gap between this os.Stat and the actual
@@ -825,9 +841,9 @@ func (t *Tool) executeLocalRestricted(ctx context.Context, cmd []string) (string
 	// execCmd.Dir changes the CHILD's working directory before its argv[0]
 	// is resolved — so a relative resolved path would be checked here
 	// against one file (relative to our cwd) and executed as a different
-	// file (the same relative path, but under dir), a bypass found during
-	// review. filepath.Abs pins it to one exact file for both the check
-	// and the exec, independent of any later chdir.
+	// file (the same relative path, but under dir), a bypass found by
+	// automated review. filepath.Abs pins it to one exact file for
+	// both the check and the exec, independent of any later chdir.
 	resolved, err = filepath.Abs(resolved)
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve command %q: %w", cmd[0], err)
@@ -905,6 +921,14 @@ func checkArgPaths(cmd []string, dir string, allowed []string) error {
 	}
 	roots := make([]string, 0, len(allowed))
 	for _, a := range allowed {
+		// When dir (working_dir / --workdir) is absolute, a relative fence is
+		// anchored on it — the same base the argument tokens below are
+		// resolved against. Otherwise allowed_paths: ["."] with a --workdir
+		// elsewhere denied every token, even `sh -c`. A relative dir is itself
+		// cwd-relative, so relative fences keep resolving against the cwd.
+		if !filepath.IsAbs(a) && filepath.IsAbs(dir) {
+			a = filepath.Join(absDir, a)
+		}
 		absAllowed, err := filepath.Abs(a)
 		if err != nil {
 			continue
@@ -1025,10 +1049,14 @@ const DefaultPidsLimit = 128
 const DefaultDockerUser = "65534:65534"
 
 // buildDockerArgs constructs the "docker run" argument list for cmd under
-// sandbox. Split out from executeInDocker so the hardening flags below are
+// sandbox. workingDir is the tool's explicit working_dir ("" = process cwd).
+// Split out from executeInDocker so the hardening flags below are
 // unit-testable without actually invoking Docker.
-func buildDockerArgs(sandbox *config.SandboxConfig, cmd []string) []string {
-	dockerCmd := []string{"run", "--rm"}
+func buildDockerArgs(sandbox *config.SandboxConfig, cmd []string, workingDir string) []string {
+	// A unique name lets executeInDocker remove the container even when the
+	// docker client itself was killed by a timeout or cancellation — killing
+	// the client does not reliably stop the container it started.
+	dockerCmd := []string{"run", "--rm", "--name", "rakitsu-" + uuid.NewString()}
 
 	// Root filesystem is read-only by default; only the explicit mounts below
 	// are writable. --tmpfs gives commands that need scratch space (compilers,
@@ -1063,7 +1091,10 @@ func buildDockerArgs(sandbox *config.SandboxConfig, cmd []string) []string {
 	// only needs to read the workdir (most linters, test runners) can't
 	// also modify or delete files there just because MountWorkdir was set.
 	if sandbox.MountWorkdir {
-		cwd, _ := os.Getwd()
+		cwd := workingDir
+		if cwd == "" {
+			cwd, _ = os.Getwd()
+		}
 		mount := cwd + ":/workspace"
 		if !sandbox.MountWorkdirWritable {
 			mount += ":ro"
@@ -1103,16 +1134,55 @@ func buildDockerArgs(sandbox *config.SandboxConfig, cmd []string) []string {
 	return dockerCmd
 }
 
+// dockerContainerName returns the value buildDockerArgs passed to --name, so
+// cleanup does not depend on the flag's position in the argument list.
+func dockerContainerName(dockerArgs []string) string {
+	for i := 0; i+1 < len(dockerArgs); i++ {
+		if dockerArgs[i] == "--name" {
+			return dockerArgs[i+1]
+		}
+	}
+	return ""
+}
+
 // executeInDocker executes the command in a Docker container
 // This provides stronger isolation but requires Docker to be installed
 func (t *Tool) executeInDocker(ctx context.Context, cmd []string) (string, error) {
-	dockerArgs := buildDockerArgs(t.sandbox, cmd)
+	// Resolve the docker client up front so a missing Docker reads as exactly
+	// that, and so nothing else is ever attempted in its place.
+	dockerPath, err := exec.LookPath("docker")
+	if err != nil {
+		return "", fmt.Errorf("docker sandbox unavailable: docker is not installed or not on PATH (host execution was not attempted): %w", err)
+	}
+
+	// Same timeout rule as local execution; before this the docker path had
+	// no deadline at all.
+	timeout := 30 * time.Second
+	if t.sandbox.ResourceLimits.TimeoutSec > 0 {
+		timeout = time.Duration(t.sandbox.ResourceLimits.TimeoutSec) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	dockerArgs := buildDockerArgs(t.sandbox, cmd, t.workingDir)
+	containerName := dockerContainerName(dockerArgs)
+	defer func() {
+		// Best-effort removal of this invocation's container. On the happy
+		// path --rm already did it and this is a no-op; after a timeout or
+		// cancellation only the client was killed and the container may
+		// still be running.
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelCleanup()
+		cleanup := exec.CommandContext(cleanupCtx, dockerPath, "rm", "-f", containerName)
+		cleanup.Env = scrubbedEnviron()
+		_ = cleanup.Run()
+	}()
 
 	// Execute. Scrub sensitive env from the local `docker` CLI process itself;
 	// the container's own environment is separate and unaffected (docker run
 	// does not forward host env unless -e/--env-file is passed, which this
 	// command builder does not do).
-	execCmd := exec.CommandContext(ctx, "docker", dockerArgs...)
+	execCmd := exec.CommandContext(ctx, dockerPath, dockerArgs...)
 	execCmd.Env = scrubbedEnviron()
 	output, err := execCmd.CombinedOutput()
 	if err != nil {

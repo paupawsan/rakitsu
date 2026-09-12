@@ -187,6 +187,17 @@ func omitRejectedParam(req *openai.ChatCompletionRequest, wrapped error) bool {
 // accepts: classic models take MaxTokens, reasoning-tier models require
 // MaxCompletionTokens (go-openai's ReasoningValidator rejects a non-zero
 // MaxTokens for those with ErrReasoningModelMaxTokensDeprecated).
+// applyReasoningEffort sets reasoning_effort on the request when configured.
+// Left unset, the field is omitted and the API default applies. GPT-5.6
+// models reject function tools on /v1/chat/completions unless the field is
+// sent explicitly, so configs targeting them set it to "none"
+// (or any level) on the provider or per agent via model_config.
+func applyReasoningEffort(req *openai.ChatCompletionRequest, effort string) {
+	if effort != "" {
+		req.ReasoningEffort = effort
+	}
+}
+
 func setMaxTokens(req *openai.ChatCompletionRequest, model string, maxTokens int) {
 	if maxTokens <= 0 {
 		return
@@ -272,6 +283,7 @@ func (p *Provider) generate(
 		maxTokens = *override.MaxTokens
 	}
 	setMaxTokens(&req, model, maxTokens)
+	applyReasoningEffort(&req, p.config.ReasoningEffort)
 
 	topP := p.config.TopP
 	hasTopPOverride := false
@@ -440,6 +452,7 @@ func (p *Provider) GenerateStream(
 		req.Temperature = float32(p.config.Temperature)
 	}
 	setMaxTokens(&req, p.model, p.config.MaxTokens)
+	applyReasoningEffort(&req, p.config.ReasoningEffort)
 	if p.config.TopP > 0 && (!reasoning || p.config.TopP == 1) {
 		req.TopP = float32(p.config.TopP)
 	}

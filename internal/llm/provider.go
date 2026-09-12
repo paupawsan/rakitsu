@@ -234,4 +234,5 @@ type ProviderConfig struct {
 	TimeoutSec        int    // optional: per-request timeout in seconds (sent as X-LiteLLM-Timeout header)
 	MaxThinkingTokens int    // optional: thinking budget cap (Anthropic extended thinking; must be >=1024)
 	ResponseFormat    string // optional: explicit format-adapter override ("standard_openai", "reasoning_content_field"). Empty = auto-detect from model name.
+	ReasoningEffort   string // optional: OpenAI reasoning_effort ("none", "minimal", "low", "medium", "high"); GPT-5.6 models require it when function tools are sent
 }

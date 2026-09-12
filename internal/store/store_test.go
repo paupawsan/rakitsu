@@ -738,7 +738,7 @@ func copyResults(m map[string]StoreStepResult) map[string]StoreStepResult {
 // suppress unused import if fmt isn't used elsewhere
 var _ = time.Second
 
-// TestWriteEvent_RedactsToolCallArguments regression-guards #70:
+// TestWriteEvent_RedactsToolCallArguments regression-guards a credential leak:
 // WriteEvent used to persist TOOL_CALL_START.Arguments verbatim, so any
 // credential-shaped argument (a token, api_key, password, ...) landed
 // unredacted in ~/.rakitsu/sessions/<id>.jsonl.

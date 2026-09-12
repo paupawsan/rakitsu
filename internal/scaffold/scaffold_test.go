@@ -536,7 +536,7 @@ func contains(ss []string, target string) bool {
 // Regression: search_files and read_file in the rag-assistant preset fence
 // relative paths to allowed_paths: ["./knowledge-base/"] but set no
 // working_dir. internal/tools/fs no longer defaults working_dir to
-// allowedPaths[0] (paupawsan/rakitsu#28 / PR #407) — without an explicit
+// allowedPaths[0] (paupawsan/rakitsu#28) — without an explicit
 // working_dir, a bare relative path like "doc1.md" now resolves against the
 // process cwd instead of the knowledge-base fence and gets rejected. Both
 // tools need working_dir: "./knowledge-base/" set explicitly.

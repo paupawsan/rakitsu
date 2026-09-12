@@ -443,8 +443,14 @@ func runAgent(cmd *cobra.Command, args []string) (runErr error) {
 		fmt.Fprintf(os.Stderr, "Max tokens override: %d\n", maxTokensOverride)
 	}
 
-	// Apply workdir to all tools that don't have their own
+	// Apply workdir to all tools that don't have their own. Made absolute
+	// first: tools anchor relative allowed_paths on an absolute working_dir
+	// (so allowed_paths: ["."] means the workdir), but treat a relative one
+	// as cwd-relative like every other relative path (paupawsan/rakitsu#28).
 	if runWorkdir != "" {
+		if abs, err := filepath.Abs(runWorkdir); err == nil {
+			runWorkdir = abs
+		}
 		for i := range cfg.Tools {
 			if cfg.Tools[i].WorkingDir == "" {
 				cfg.Tools[i].WorkingDir = runWorkdir
@@ -1162,6 +1168,7 @@ func createLLMProvider(ctx context.Context, cfg *config.Config, providerName, mo
 		Location:        cfg.GetLocation(providerName),
 		Project:         cfg.GetProject(providerName),
 		ResponseFormat:  cfg.GetResponseFormat(providerName),
+		ReasoningEffort: cfg.GetReasoningEffort(providerName),
 		Temperature:     cfg.Settings.Defaults.Temperature,
 		MaxTokens:       cfg.Settings.Defaults.MaxTokens,
 	}
@@ -1182,6 +1189,9 @@ func createLLMProvider(ctx context.Context, cfg *config.Config, providerName, mo
 		}
 		if modelConfig.MaxThinkingTokens > 0 {
 			pc.MaxThinkingTokens = modelConfig.MaxThinkingTokens
+		}
+		if modelConfig.ReasoningEffort != "" {
+			pc.ReasoningEffort = modelConfig.ReasoningEffort
 		}
 	}
 

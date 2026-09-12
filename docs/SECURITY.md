@@ -151,6 +151,28 @@ it over local execution for untrusted configs, but it is still a soft
 container, not a hardened jail — a kernel exploit or a docker misconfiguration
 elsewhere on the host is out of scope for any of the above.
 
+The docker path fails closed. If the `docker` client is not installed or not
+on `PATH`, the tool call errors out saying so — it never runs the command on
+the host instead. The same timeout as local execution applies
+(`resource_limits.timeout_sec`, 30s default), and each run gets a unique
+`rakitsu-<uuid>` container name that is force-removed afterwards, so a
+timeout or cancellation that kills the docker client cannot leave the
+container running behind it. `mount_workdir: true` mounts the tool's
+`working_dir` when one is set (the process cwd otherwise), the same directory
+local mode would run in.
+
+### Sandbox settings are validated, not guessed
+
+An unknown `sandbox.type` (a typo like `dokcer`) is refused — at config load
+and again at execution time for tools built directly. It used to fall through
+to `local_restricted`, i.e. a typo silently picked the *least* isolated mode.
+Docker-only options (`image`, `user`, `mount_workdir*`, `allow_network`,
+`network_isolated`, cpu/memory/pids limits) set on a `local_restricted` tool
+are refused for the same reason: they were ignored, which reads as isolation
+the tool never had. Contradictory (`allow_network` + `network_isolated`,
+`mount_workdir_writable` without `mount_workdir`) and negative settings are
+refused too. An empty `type` still means `local_restricted`.
+
 ## Mode 2 — the hub (`rakitsu serve`)
 
 Trust model: **loopback-only and single-user by default.**

@@ -222,11 +222,12 @@ type ProviderDefinition struct {
 	APIKey          string `mapstructure:"api_key" yaml:"api_key"`
 	BaseURL         string `mapstructure:"base_url,omitempty" yaml:"base_url,omitempty"`
 	CredentialsFile string `mapstructure:"credentials_file,omitempty" yaml:"credentials_file,omitempty"`
-	Location        string `mapstructure:"location,omitempty" yaml:"location,omitempty"`               // cloud region for Vertex AI (e.g., "us-central1", "global")
-	Project         string `mapstructure:"project,omitempty" yaml:"project,omitempty"`                 // GCP project ID for Vertex AI
-	DefaultModel    string `mapstructure:"default_model,omitempty" yaml:"default_model,omitempty"`     // default model for this provider; falls back behind agent.Model, ahead of settings.defaults.model
-	ResponseFormat  string `mapstructure:"response_format,omitempty" yaml:"response_format,omitempty"` // optional adapter override: "standard_openai", "reasoning_content_field". Empty = auto-detect from model name.
-	RateLimit       int    `mapstructure:"rate_limit,omitempty" yaml:"rate_limit,omitempty"`           // max requests per minute to this provider (0 = unlimited)
+	Location        string `mapstructure:"location,omitempty" yaml:"location,omitempty"`                 // cloud region for Vertex AI (e.g., "us-central1", "global")
+	Project         string `mapstructure:"project,omitempty" yaml:"project,omitempty"`                   // GCP project ID for Vertex AI
+	DefaultModel    string `mapstructure:"default_model,omitempty" yaml:"default_model,omitempty"`       // default model for this provider; falls back behind agent.Model, ahead of settings.defaults.model
+	ResponseFormat  string `mapstructure:"response_format,omitempty" yaml:"response_format,omitempty"`   // optional adapter override: "standard_openai", "reasoning_content_field". Empty = auto-detect from model name.
+	RateLimit       int    `mapstructure:"rate_limit,omitempty" yaml:"rate_limit,omitempty"`             // max requests per minute to this provider (0 = unlimited)
+	ReasoningEffort string `mapstructure:"reasoning_effort,omitempty" yaml:"reasoning_effort,omitempty"` // OpenAI reasoning_effort sent on every request ("none", "minimal", "low", "medium", "high"); GPT-5.6 models require it with tools
 }
 
 // DefaultSettings contains default model configuration
@@ -438,6 +439,7 @@ type ModelConfig struct {
 	NoStreamTools     bool    `mapstructure:"no_stream_tools" yaml:"no_stream_tools"`                             // disable streaming when tools are present (vLLM/Qwen3 workaround)
 	MaxThinkingTokens int     `mapstructure:"max_thinking_tokens,omitempty" yaml:"max_thinking_tokens,omitempty"` // Anthropic extended thinking budget cap (must be >=1024)
 	ThinkingOffload   bool    `mapstructure:"thinking_offload" yaml:"thinking_offload"`                           // strip thinking from history and store externally
+	ReasoningEffort   string  `mapstructure:"reasoning_effort,omitempty" yaml:"reasoning_effort,omitempty"`       // per-agent OpenAI reasoning_effort override (wins over the provider's)
 }
 
 // AgentSettings contains agent-specific settings
@@ -901,6 +903,15 @@ func (c *Config) GetResponseFormat(provider string) string {
 	return ""
 }
 
+// GetReasoningEffort returns the provider-level OpenAI reasoning_effort
+// setting, or empty string if none set (meaning: omit the field).
+func (c *Config) GetReasoningEffort(provider string) string {
+	if pd, ok := c.findProvider(provider); ok {
+		return pd.ReasoningEffort
+	}
+	return ""
+}
+
 // GetProject returns the GCP project ID for a provider.
 // Checks named providers first, then falls back to flat projects map.
 func (c *Config) GetProject(provider string) string {
@@ -1060,6 +1071,8 @@ func (c *Config) Validate() []*ValidationError {
 	add := func(field, msg string) {
 		errs = append(errs, &ValidationError{Field: field, Message: msg})
 	}
+
+	c.validateToolSecurity(add)
 
 	// 1. Duplicate agent names
 	agentNames := make(map[string]int)
