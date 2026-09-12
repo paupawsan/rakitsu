@@ -156,6 +156,22 @@ subprocesses it spawns so an agent cannot read it back.
   page cannot drive your agent), but there is no CSRF token on same-origin
   POSTs yet.
 
+## Telemetry & session logs
+
+Tool-call events (`TOOL_CALL_START`'s and `THOUGHT_END`'s planned-call
+`Arguments`) are written to both `~/.rakitsu/sessions/<id>.jsonl` and, when
+connected to a hub, the hub's event stream. Any argument whose key looks
+credential-shaped (`token`, `api_key`, `password`, `secret`,
+`authorization`, case-insensitive) is masked to `[REDACTED]` before either
+sink sees it.
+
+This does **not** cover tool *output* — `TOOL_CALL_END.Output`/`.Error` is
+free-form text (e.g. whatever a `cat` or `curl` call printed), not a
+structured key/value map, so it isn't pattern-scanned yet. If a tool call
+prints a secret, that secret can still land in the session file or hub
+stream. Don't feed configs/agents that might do that into a shared or
+long-lived session without reviewing the log.
+
 ## Reporting
 
 This is pre-release (alpha) software. If you find a security issue, please open

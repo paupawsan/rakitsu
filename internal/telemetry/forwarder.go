@@ -141,6 +141,7 @@ func (c *HubClient) forwardEvents() {
 				return
 			}
 			ev.SessionID = c.sessionID
+			ev.Payload = RedactEventPayload(ev.EventType, ev.Payload)
 			batch = append(batch, ev)
 			if len(batch) >= 50 {
 				flush()

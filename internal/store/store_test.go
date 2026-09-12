@@ -737,3 +737,37 @@ func copyResults(m map[string]StoreStepResult) map[string]StoreStepResult {
 
 // suppress unused import if fmt isn't used elsewhere
 var _ = time.Second
+
+// TestWriteEvent_RedactsToolCallArguments regression-guards #70:
+// WriteEvent used to persist TOOL_CALL_START.Arguments verbatim, so any
+// credential-shaped argument (a token, api_key, password, ...) landed
+// unredacted in ~/.rakitsu/sessions/<id>.jsonl.
+func TestWriteEvent_RedactsToolCallArguments(t *testing.T) {
+	s := newTestStore(t)
+	id := startTestSession(t, s)
+
+	payload, _ := json.Marshal(telemetry.ToolCallStartPayload{
+		ToolCallID: "tc-1",
+		ToolName:   "cli",
+		Arguments: map[string]interface{}{
+			"command": "curl",
+			"token":   "sk-secret",
+		},
+	})
+	s.WriteEvent(telemetry.AgentEvent{
+		EventType: telemetry.EventToolCallStart,
+		Payload:   payload,
+	})
+
+	b, err := os.ReadFile(filepath.Join(s.dir, id+".jsonl"))
+	if err != nil {
+		t.Fatalf("read session file: %v", err)
+	}
+	content := string(b)
+	if strings.Contains(content, "sk-secret") {
+		t.Fatalf("secret token leaked unredacted into session file: %s", content)
+	}
+	if !strings.Contains(content, `"token":"[REDACTED]"`) {
+		t.Fatalf("expected a redacted token value in the session JSONL, got: %s", content)
+	}
+}
