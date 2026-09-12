@@ -87,11 +87,21 @@ the only mode that provides process isolation.
   file contents on every `cli` call, which rakitsu deliberately doesn't do.
   The self-invocation check and the actual exec both resolve the command
   to a single, absolute path (rather than each doing their own separate,
-  possibly-relative lookup) to close the window between them; the smaller,
-  classic check-then-exec gap — the file changing on disk between that
-  check and the exec syscall itself — is not eliminated, since doing so
-  would need file-descriptor-based exec, which Go's standard library
-  doesn't expose portably.
+  possibly-relative lookup) to close the window between them. **On Linux**,
+  the check-then-exec gap is closed entirely: the resolved file is opened
+  and verified via that file descriptor's own identity, then exec'd through
+  `/proc/self/fd/N` rather than by path — an open descriptor keeps
+  referring to its original inode even if the path is later replaced, so
+  what was verified and what actually runs are provably the same file, no
+  matter what happens to the path in between. **On macOS/BSD**, which have
+  no `/proc` and no portable file-descriptor-based exec, the identity check
+  still runs against the open file (tighter than a bare path re-check) but
+  the final exec still goes by path — a narrow, classic check-then-exec
+  race remains there, requiring an attacker with concurrent filesystem
+  write access to the exact resolved path timed to a sub-millisecond
+  window (a materially stronger position than the original gap this
+  section describes, which required nothing more than a name in
+  `allowed_commands`).
 - **Untrusted work:** use `sandbox: { type: docker }` (see below).
 
 ### Docker sandbox
