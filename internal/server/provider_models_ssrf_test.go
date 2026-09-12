@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -68,7 +69,7 @@ func TestNewProxyHTTPClient_RedirectToBlockedTarget_Refused(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := newProxyHTTPClient()
+	client := proxyHTTPClient
 	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -76,5 +77,53 @@ func TestNewProxyHTTPClient_RedirectToBlockedTarget_Refused(t *testing.T) {
 	_, err = client.Do(req)
 	if err == nil {
 		t.Fatal("expected a redirect to a blocked address to be refused")
+	}
+}
+
+// TestHandleProviderModels_ReusesConnectionAcrossCalls regression-guards a
+// finding from automated review: the proxy handlers used to build a fresh
+// http.Client (and fresh http.Transport, each with its own idle-connection
+// pool) on every request via newProxyHTTPClient(). Nothing ever closed
+// those idle connections, so a busy or repeatedly-hit endpoint accumulated
+// open connections/file descriptors across abandoned transports instead of
+// reusing one pool.
+//
+// Proof by observable behavior rather than reflection into unexported
+// Transport state: with a real shared client, two requests to the same
+// server over keep-alive land on the same TCP connection, which the test
+// server sees as an identical net.Conn (compared by pointer via a
+// ConnState hook — RemoteAddr can theoretically repeat across different
+// connections, a net.Conn identity cannot). A per-call client/Transport
+// would instead dial a fresh connection every time.
+func TestHandleProviderModels_ReusesConnectionAcrossCalls(t *testing.T) {
+	var mu sync.Mutex
+	seen := map[net.Conn]bool{}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":[]}`))
+	}))
+	srv.Config.ConnState = func(c net.Conn, state http.ConnState) {
+		if state == http.StateActive {
+			mu.Lock()
+			seen[c] = true
+			mu.Unlock()
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+
+	s := &SSEServer{}
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/api/providers/models?base_url="+srv.URL, nil)
+		rec := httptest.NewRecorder()
+		s.handleProviderModels(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("call %d: status = %d, body = %s", i, rec.Code, rec.Body.String())
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 1 {
+		t.Fatalf("expected all 3 requests to reuse one keep-alive connection, server saw %d distinct connections — the proxy client is not being shared across calls", len(seen))
 	}
 }
