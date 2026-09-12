@@ -313,6 +313,39 @@ type Parameter struct {
 	Required    bool        `mapstructure:"required" yaml:"required"`
 	Default     interface{} `mapstructure:"default" yaml:"default"`
 	Enum        []string    `mapstructure:"enum,omitempty" yaml:"enum,omitempty"`
+	// ArgvSplit applies only to a `cli` tool's `command` template, and only
+	// when this parameter is the ENTIRE content of one command part (e.g.
+	// `command: "gh {{args}}"`, no shell wrapper). The CLI tool execs
+	// argv-direct with no shell to split a free-text value on whitespace, so
+	// by default the whole value lands as a single argv element — right for
+	// a value meant to be one argument (e.g. `python3 -c {{code}}`), wrong
+	// for a value meant as a full free-text argument string (e.g. `gh
+	// {{args}}` given "repo view --json foo"). Set true to shell-aware split
+	// the value into multiple argv tokens instead. Defaults to false so
+	// existing configs keep their current (single-token) behavior
+	// unchanged. Has no effect when the placeholder sits inside a larger
+	// string, e.g. a shell payload passed to `sh -c`/`bash -c` — that stays
+	// single-token, substituted before the shell parses it.
+	//
+	// The split respects only SINGLE-quoted grouping (matching how command
+	// templates in YAML are written), not double quotes — a value like
+	// `--message "hello world"` splits into `--message`, `"hello`, `world"`
+	// with the literal quote characters intact, not a single grouped
+	// argument. No shell is invoked so nothing escapes containment, but a
+	// double-quoted value (a natural way for a model to quote a multi-word
+	// argument) won't group as one token; prefer designing the tool's
+	// command/parameters so multi-word values don't need in-value quoting.
+	//
+	// An UNMATCHED single quote in the value is worse than non-grouping: an
+	// odd apostrophe (e.g. "don't" in ordinary free-text like a commit
+	// message) is silently DROPPED and everything after it in the value
+	// merges into one argv token instead of splitting on whitespace, since
+	// the splitter's quote-toggle state never flips back off. E.g.
+	// `-m "don't forget --user=x" now` splits into `-m`, `"dont forget
+	// --user=x" now` — the apostrophe vanishes and the trailing `now`
+	// merges in. Same containment guarantee applies (no shell parses the
+	// result), but avoid values with an odd number of single quotes.
+	ArgvSplit bool `mapstructure:"argv_split,omitempty" yaml:"argv_split,omitempty"`
 }
 
 // SandboxConfig defines security sandbox configuration

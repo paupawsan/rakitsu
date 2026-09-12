@@ -65,6 +65,11 @@ want protected from *obvious* mistakes by the model. If untrusted execution
 needs a real filesystem boundary, use `sandbox: { type: docker }` — that is
 the only mode that provides process isolation.
 
+A parameter's `argv_split: true` (splitting a whole-part templated value
+into multiple argv tokens, e.g. for `command: "gh {{args}}"`) doesn't change
+any of this: `checkArgPaths` already re-splits every argv element on
+whitespace before checking it, whether or not `argv_split` is set.
+
 ### Reducing blast radius
 
 - **`fs` tools:** always set `allowed_paths` explicitly. The default is `["."]`
