@@ -76,7 +76,22 @@ the only mode that provides process isolation.
   into memory before any limit applies.
 - **`cli` tools:** keep `settings.allowed_commands` minimal. Every command you
   add is a new capability. `docker` in particular is effectively root on most
-  dev machines (it can mount the host and run privileged containers).
+  dev machines (it can mount the host and run privileged containers). The
+  running `rakitsu` binary itself is always rejected, even if you list it in
+  `allowed_commands` — a `cli` tool cannot re-invoke rakitsu to spawn a second
+  process against a different config/workdir and escape this session's
+  sandboxing. This also catches a symlink or hard link to the binary under
+  an unrelated name (checked by file identity, not just the name), but not
+  a byte-for-byte copy under a different name — that has its own inode and
+  is indistinguishable from any other unknown executable without hashing
+  file contents on every `cli` call, which rakitsu deliberately doesn't do.
+  The self-invocation check and the actual exec both resolve the command
+  to a single, absolute path (rather than each doing their own separate,
+  possibly-relative lookup) to close the window between them; the smaller,
+  classic check-then-exec gap — the file changing on disk between that
+  check and the exec syscall itself — is not eliminated, since doing so
+  would need file-descriptor-based exec, which Go's standard library
+  doesn't expose portably.
 - **Untrusted work:** use `sandbox: { type: docker }` (see below).
 
 ### Docker sandbox
