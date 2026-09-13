@@ -420,6 +420,8 @@ orchestrator:
         agent: "Explorer"           # sequential step
       - name: "analyze"
         agent: "Analyzer"           # sequential step
+        require_tool_call:         # gate: step fails unless Analyzer actually
+          tool: "sh"                # called this tool (not just claimed to)
       - name: "review"
         type: "parallel"            # parallel step
         steps:
@@ -585,12 +587,23 @@ flowchart TD
     STEPS --> LOOP["for each step"]
     LOOP --> TYPE{"step.Type"}
     TYPE -->|sequential| SEQ["Run Agent\nstep.Agent with task"]
-    SEQ --> STORE["Store result in PipelineContext\n{step_name}_result\n{step_name}_status"]
+    SEQ --> GATE{"step.RequireToolCall set?"}
+    GATE -->|no| STORE["Store result in PipelineContext\n{step_name}_result\n{step_name}_status"]
+    GATE -->|yes| CHECK["checkRequireToolCall:\nagent actually called the tool?"]
+    CHECK -->|yes| STORE
+    CHECK -->|no| FAIL["Step fails\n(ignores agent's self-reported result)"]
     TYPE -->|parallel| PAR["Launch goroutine\nper sub-step"]
     PAR --> WG["sync.WaitGroup.Wait()"]
     WG --> COLL["Collect results\nStore all in PipelineContext"]
     STORE & COLL --> NEXT["Next step\n(result available as template var)"]
 ```
+
+A sequential step can declare `require_tool_call: { tool, command_contains?, arg_key? }`
+to mechanically verify its agent actually invoked a named tool during the
+run, instead of trusting the agent's self-reported final answer. If the
+runner can't be checked at all (doesn't implement `ToolCallReporter` — e.g.
+a nested orchestrator reached via `step.Agent`), the step fails rather than
+passing on trust — see `internal/agent/pipeline.go`'s `checkRequireToolCall`.
 
 ### ReAct Orchestrator Flow
 

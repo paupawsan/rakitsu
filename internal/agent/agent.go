@@ -107,6 +107,23 @@ type Agent struct {
 	// of each Run. Read via LastRunUnproductive().
 	lastRunUnproductive atomic.Bool
 
+	// toolCallsByRun records tool calls made during a Run, keyed by the
+	// run-scoped ID a caller attaches to ctx via NewToolCallRunContext —
+	// NOT a single shared "last run" field. *Agent instances are not safe
+	// for concurrent Run() calls in general (see pipeline.go's
+	// duplicateAgentInGroup error), but a worker can still be reached
+	// concurrently through independent delegation paths (the same failure
+	// mode orchestratorRunState exists to fix for *Orchestrator, above) —
+	// a single shared slice reset at Run start would let one Run's reset
+	// or recorded calls corrupt another concurrent Run's view. Keying by a
+	// caller-supplied run ID makes each caller's view isolated regardless.
+	// Only populated when a caller opts in via NewToolCallRunContext (most
+	// Run() callers never touch this ctx key, so no calls are recorded and
+	// this map stays empty for them — no unbounded growth). Read via
+	// ToolCallsForRun(id), which also deletes the entry once read.
+	toolCallsByRunMu sync.Mutex
+	toolCallsByRun   map[uint64][]llm.ToolCall
+
 	// rollback holds the resolved per-agent runtime self-correction config.
 	// When Enabled, a dead-end iteration is rewound out of history mid-Run.
 	rollback config.RollbackConfig
@@ -476,6 +493,12 @@ func (a *Agent) RunWithAttachments(ctx context.Context, query string, history []
 	a.lastRunSalvaged.Store(false)
 	// Reset broader unproductive flag for the same reason.
 	a.lastRunUnproductive.Store(false)
+	// Tool-call tracking (toolCallsByRun) is NOT reset here — unlike the two
+	// flags above, it's keyed by a caller-supplied run ID from ctx (see
+	// NewToolCallRunContext), not a single "last run" slot, specifically so
+	// this Run doesn't clobber another concurrent Run's recorded calls on
+	// the same *Agent. See the toolCallsByRun field doc for why.
+	runToolCallID, trackToolCalls := toolCallRunIDFromContext(ctx)
 
 	// Hot-reload: re-read this agent's RollbackConfig from its source YAML so
 	// a config edit takes effect on this turn. No-op unless SetConfigReloadPath
@@ -1170,6 +1193,21 @@ func (a *Agent) RunWithAttachments(ctx context.Context, query string, history []
 			if r.err != nil {
 				errMsg = r.err.Error()
 				anyToolError = true
+			}
+
+			// Record every attempted call (regardless of success) so a
+			// pipeline-level require_tool_call gate can mechanically verify
+			// the agent actually invoked the tool it was asked to use. Only
+			// when this Run opted in via NewToolCallRunContext — see
+			// toolCallsByRun's field doc for why this is keyed by run ID
+			// instead of a single shared slot.
+			if trackToolCalls {
+				a.toolCallsByRunMu.Lock()
+				if a.toolCallsByRun == nil {
+					a.toolCallsByRun = make(map[uint64][]llm.ToolCall)
+				}
+				a.toolCallsByRun[runToolCallID] = append(a.toolCallsByRun[runToolCallID], r.call)
+				a.toolCallsByRunMu.Unlock()
 			}
 
 			// Track consecutive identical failures per tool+error pair.
@@ -2003,4 +2041,58 @@ func (a *Agent) LastRunSalvaged() bool {
 // apply a per-worker re-delegation cap broader than the salvage-only cap.
 func (a *Agent) LastRunUnproductive() bool {
 	return a.lastRunUnproductive.Load()
+}
+
+// toolCallRunIDKeyType is an unexported context-key type so no other
+// package can accidentally collide with or forge this key.
+type toolCallRunIDKeyType struct{}
+
+var toolCallRunIDKey = toolCallRunIDKeyType{}
+
+// toolCallRunIDCounter mints unique run IDs for NewToolCallRunContext.
+// Package-level (not per-Agent) since a run ID must be unique across every
+// *Agent instance a caller might track concurrently, not just one.
+var toolCallRunIDCounter atomic.Uint64
+
+// NewToolCallRunContext returns ctx wrapped with a fresh, unique ID for
+// this specific call, so ToolCallsForRun can later retrieve exactly this
+// invocation's tool calls — even if the same *Agent is (against the usual
+// expectation, see toolCallsByRun's field doc) Run concurrently from
+// another goroutine. A caller that doesn't need require_tool_call-style
+// verification should just pass ctx through unmodified to Run(); tool
+// calls are only tracked for run IDs a caller explicitly asked for.
+func NewToolCallRunContext(ctx context.Context) (context.Context, uint64) {
+	id := toolCallRunIDCounter.Add(1)
+	return context.WithValue(ctx, toolCallRunIDKey, id), id
+}
+
+// toolCallRunIDFromContext extracts a run ID set by NewToolCallRunContext,
+// if any. The second return is false when the caller never opted in — in
+// that case RunWithAttachments skips tool-call tracking for this Run
+// entirely, so toolCallsByRun never accumulates entries nobody will read.
+func toolCallRunIDFromContext(ctx context.Context) (uint64, bool) {
+	id, ok := ctx.Value(toolCallRunIDKey).(uint64)
+	return id, ok
+}
+
+// ToolCallsForRun returns every tool call attempted during the specific Run
+// invocation identified by runID (obtained from NewToolCallRunContext and
+// passed to Run's ctx), in call order, regardless of whether each call
+// succeeded. Outer orchestrators read this (via the ToolCallReporter
+// interface in orchestrator.go) to mechanically verify a step actually did
+// what its worker agent claims — e.g. a pipeline step's require_tool_call
+// gate. Unlike a single "last run" field, keying by an explicit run ID
+// keeps this correct even if the same *Agent is reached concurrently
+// through independent delegation paths (see toolCallsByRun's field doc).
+// The returned slice is a copy; mutating it does not affect the agent.
+// The entry is deleted after being read, so toolCallsByRun doesn't grow
+// unboundedly across a long-lived agent's many Runs.
+func (a *Agent) ToolCallsForRun(runID uint64) []llm.ToolCall {
+	a.toolCallsByRunMu.Lock()
+	defer a.toolCallsByRunMu.Unlock()
+	calls := a.toolCallsByRun[runID]
+	delete(a.toolCallsByRun, runID)
+	out := make([]llm.ToolCall, len(calls))
+	copy(out, calls)
+	return out
 }

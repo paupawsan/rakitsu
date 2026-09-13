@@ -575,6 +575,29 @@ type PipelineStep struct {
 	ConditionPrompt string         `mapstructure:"condition_prompt,omitempty" yaml:"condition_prompt,omitempty"` // loop: prompt for pass/fail check
 	TimeoutSec      int            `mapstructure:"timeout_sec,omitempty" yaml:"timeout_sec,omitempty"`           // per-step timeout in seconds
 	DependsOn       []string       `mapstructure:"depends_on,omitempty" yaml:"depends_on,omitempty"`             // names of steps that must complete before this one
+
+	// RequireToolCall is a mechanical cross-check: if set, the step's agent
+	// run must have actually invoked the named tool (matching
+	// CommandContains, when set) or the step is forced to fail regardless of
+	// what the agent's own final answer or a condition agent's verdict says.
+	// Guards against a worker/condition agent self-reporting success without
+	// doing the work its prompt asked for.
+	RequireToolCall *RequireToolCallGate `mapstructure:"require_tool_call,omitempty" yaml:"require_tool_call,omitempty"`
+}
+
+// RequireToolCallGate names a tool call that must have occurred during a
+// pipeline step's agent run for the step to be allowed to pass.
+type RequireToolCallGate struct {
+	Tool            string `mapstructure:"tool" yaml:"tool"`                                             // required tool name, e.g. "sh"
+	CommandContains string `mapstructure:"command_contains,omitempty" yaml:"command_contains,omitempty"` // if set, a substring the checked argument must contain
+	// ArgKey names which of the call's arguments CommandContains is checked
+	// against, e.g. "cmd" for the built-in cli tool. If unset, the gate only
+	// matches a call whose arguments have exactly one string-valued field
+	// (the common case for a single-parameter tool like "sh") and checks
+	// that one — a call with zero or multiple string arguments is treated
+	// as not matching rather than guessed at, so CommandContains can never
+	// be satisfied by an unrelated field (a path, an env value, metadata).
+	ArgKey string `mapstructure:"arg_key,omitempty" yaml:"arg_key,omitempty"`
 }
 
 // WorkflowDefinition defines a pre-configured workflow (legacy, use PipelineConfig instead)
@@ -1222,6 +1245,12 @@ func validatePipelineSteps(steps []PipelineStep, runners map[string]bool, prefix
 			*errs = append(*errs, &ValidationError{
 				Field:   path + ".condition_agent",
 				Message: fmt.Sprintf("step %q references unknown condition agent %q", s.Name, s.ConditionAgent),
+			})
+		}
+		if s.RequireToolCall != nil && s.RequireToolCall.Tool == "" {
+			*errs = append(*errs, &ValidationError{
+				Field:   path + ".require_tool_call.tool",
+				Message: fmt.Sprintf("step %q has require_tool_call but no tool name", s.Name),
 			})
 		}
 	}

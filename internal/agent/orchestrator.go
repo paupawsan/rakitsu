@@ -69,6 +69,20 @@ type OutcomeReporter interface {
 	LastRunUnproductive() bool
 }
 
+// ToolCallReporter is implemented by Runner-typed workers (currently *Agent)
+// that can report every tool call made during a specific Run invocation,
+// identified by the run ID a caller attached via NewToolCallRunContext
+// before calling Run. The Pipeline strategy's require_tool_call step gate
+// uses this to mechanically verify a step's agent actually invoked the tool
+// it was told to, instead of trusting the agent's own self-reported final
+// answer. Keyed by run ID rather than "the last Run" so this stays correct
+// even if the same worker is reached concurrently through independent
+// delegation paths — see *Agent's toolCallsByRun field doc for why a
+// single shared "last run" slot isn't safe here.
+type ToolCallReporter interface {
+	ToolCallsForRun(runID uint64) []llm.ToolCall
+}
+
 // orchestratorRunState holds the fallback/salvage-tracking state scoped to a
 // single runReAct() invocation. This used to live directly on the long-lived
 // *Orchestrator (guarded by lastWorkerMu/salvageMu), which was only correct
