@@ -554,9 +554,25 @@ func (o *Orchestrator) executeSequentialStep(ctx context.Context, step config.Pi
 		PriorStepCount: priorCount,
 	})
 
-	result, err := runner.Run(stepCtx, task)
+	runCtx := stepCtx
+	var runToolCallID uint64
+	if step.RequireToolCall != nil {
+		runCtx, runToolCallID = NewToolCallRunContext(stepCtx)
+	}
+
+	result, err := runner.Run(runCtx, task)
 	if err != nil {
+		// Run itself failed, so checkRequireToolCall below never runs — but
+		// a run ID was still minted (and the agent may still have recorded
+		// calls against it before erroring), so it must still be released
+		// or it leaks in toolCallsByRun for the life of the agent. Discard
+		// the calls; nothing reads them on this path.
+		releaseToolCallRun(runner, runToolCallID)
 		return "", err
+	}
+
+	if gateErr := checkRequireToolCall(step, runner, runToolCallID); gateErr != nil {
+		return "", gateErr
 	}
 
 	// Emit result message
@@ -568,6 +584,89 @@ func (o *Orchestrator) executeSequentialStep(ctx context.Context, step config.Pi
 	})
 
 	return result, nil
+}
+
+// releaseToolCallRun discards a run ID's recorded tool calls without
+// checking them — used when a gated step's runner.Run itself failed, so
+// checkRequireToolCall (which would otherwise consume the entry via
+// ToolCallsForRun) never runs. Without this, a run ID minted for a step
+// that keeps erroring (e.g. a persistently failing agent, or a cancelled
+// context) would never be read back and its entry would leak in
+// toolCallsByRun for the life of the agent. No-op for runID 0 (no gate was
+// configured, so NewToolCallRunContext — whose counter starts at 1 — was
+// never called and there's nothing to release) or a runner that doesn't
+// implement ToolCallReporter.
+func releaseToolCallRun(runner Runner, runID uint64) {
+	if runID == 0 {
+		return
+	}
+	if reporter, ok := runner.(ToolCallReporter); ok {
+		reporter.ToolCallsForRun(runID)
+	}
+}
+
+// checkRequireToolCall mechanically cross-checks a step's require_tool_call
+// gate (if any) against the tool calls the step's agent actually made,
+// instead of trusting the agent's self-reported final answer. runID is the
+// run-scoped ID minted for this specific Run invocation (see
+// NewToolCallRunContext) — zero/unused when the step has no gate. Returns
+// nil when the step has no gate or when a matching call was found. Fails
+// CLOSED otherwise: a runner that doesn't implement ToolCallReporter (e.g.
+// a nested *Orchestrator — agents map values aren't limited to *Agent, see
+// nested_integration_test.go) can't be verified, and require_tool_call
+// exists specifically so a step can't pass on trust alone — so "can't
+// verify" is treated the same as "verification failed", not skipped.
+func checkRequireToolCall(step config.PipelineStep, runner Runner, runID uint64) error {
+	gate := step.RequireToolCall
+	if gate == nil {
+		return nil
+	}
+	reporter, ok := runner.(ToolCallReporter)
+	if !ok {
+		return fmt.Errorf("step %q requires a %q tool call but its runner (%T) doesn't report tool calls, so the gate can't be verified", step.Name, gate.Tool, runner)
+	}
+	for _, call := range reporter.ToolCallsForRun(runID) {
+		if call.Name != gate.Tool {
+			continue
+		}
+		if gate.CommandContains == "" {
+			return nil
+		}
+		if arg, ok := commandArgValue(call, gate.ArgKey); ok && strings.Contains(arg, gate.CommandContains) {
+			return nil
+		}
+	}
+	if gate.CommandContains != "" {
+		return fmt.Errorf("step %q required a %q tool call matching %q, none occurred", step.Name, gate.Tool, gate.CommandContains)
+	}
+	return fmt.Errorf("step %q required a %q tool call, none occurred", step.Name, gate.Tool)
+}
+
+// commandArgValue returns the string argument a require_tool_call gate's
+// CommandContains should be checked against, and whether one could be
+// unambiguously determined. If argKey is set, only that argument is
+// considered. Otherwise, the call must have exactly one string-valued
+// argument — the common shape for a single-parameter tool like "sh" — or
+// this returns false rather than guessing, so a match can never be
+// satisfied by an unrelated field (a path, an env value, metadata) that
+// happens to contain the target substring.
+func commandArgValue(call llm.ToolCall, argKey string) (string, bool) {
+	if argKey != "" {
+		s, ok := call.Arguments[argKey].(string)
+		return s, ok
+	}
+	var found string
+	count := 0
+	for _, v := range call.Arguments {
+		if s, ok := v.(string); ok {
+			found = s
+			count++
+		}
+	}
+	if count != 1 {
+		return "", false
+	}
+	return found, true
 }
 
 // executeParallelStep runs sub-steps concurrently and merges results.

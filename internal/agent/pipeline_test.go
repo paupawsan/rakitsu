@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/paupawsan/rakitsu/internal/config"
+	"github.com/paupawsan/rakitsu/internal/debug"
 	"github.com/paupawsan/rakitsu/internal/llm"
 	"github.com/paupawsan/rakitsu/internal/telemetry"
 	"github.com/paupawsan/rakitsu/internal/tools"
@@ -27,7 +28,7 @@ type fastProvider struct{ answer string }
 func (p *fastProvider) Generate(_ context.Context, _ string, _ []llm.Message, _ []llm.ToolDefinition) (*llm.GenerateResult, error) {
 	return &llm.GenerateResult{Response: p.answer, FinishReason: "stop"}, nil
 }
-func (p *fastProvider) GetName() string { return "fast" }
+func (p *fastProvider) GetName() string  { return "fast" }
 func (p *fastProvider) GetModel() string { return "stub" }
 
 // slowProvider blocks until its context is cancelled, then returns ctx.Err().
@@ -37,7 +38,7 @@ func (p *slowProvider) Generate(ctx context.Context, _ string, _ []llm.Message, 
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
-func (p *slowProvider) GetName() string { return "slow" }
+func (p *slowProvider) GetName() string  { return "slow" }
 func (p *slowProvider) GetModel() string { return "stub" }
 
 // newTestAgent creates a minimal agent backed by the given provider.
@@ -103,7 +104,7 @@ func TestExecuteStep_StatusSuccess(t *testing.T) {
 	}
 	// verify PIPELINE_STEP_END event has status "success"
 	evts := collectEvents(bus, func() {}) // already fired
-	_ = evts // event already consumed; check via pctx
+	_ = evts                              // event already consumed; check via pctx
 }
 
 func TestExecuteStep_StatusTimeout(t *testing.T) {
@@ -150,6 +151,236 @@ func TestExecuteStep_StatusError(t *testing.T) {
 // ============================================================
 // Parallel step timeout tests
 // ============================================================
+
+// ============================================================
+// require_tool_call gate tests
+// ============================================================
+
+// TestExecuteStep_RequireToolCall_Satisfied_Success reproduces the good
+// path: the step's agent actually invokes the required tool with matching
+// arguments, so the gate lets the step's own success stand.
+func TestExecuteStep_RequireToolCall_Satisfied_Success(t *testing.T) {
+	bus := telemetry.NewEventBus(16)
+	reg := tools.NewToolRegistry()
+	reg.RegisterTool(newMockTool("sh", "ok"))
+	provider := newSequenceProvider(
+		llm.GenerateResult{
+			ToolCalls:    []llm.ToolCall{{ID: "c1", Name: "sh", Arguments: map[string]interface{}{"cmd": "printf 'l\\nq\\n' | node dist/index.js"}}},
+			FinishReason: "tool_calls",
+		},
+		llm.GenerateResult{Response: "OVERALL: PASS", FinishReason: "stop"},
+	)
+	ag := NewAgent(&config.AgentDefinition{Name: "worker", Role: "worker", Tools: []string{"sh"}}, provider, reg, bus, nil)
+	o := newTestOrchestrator(nil, map[string]*Agent{"worker": ag})
+	o.eventBus = bus
+
+	step := config.PipelineStep{
+		Name: "accept", Agent: "worker", Task: "verify",
+		RequireToolCall: &config.RequireToolCallGate{Tool: "sh", CommandContains: "node dist/index.js"},
+	}
+	pctx := newPipelineContext("q")
+
+	_, err := o.executeStep(context.Background(), step, pctx)
+	if err != nil {
+		t.Fatalf("expected step to pass (tool was called), got error: %v", err)
+	}
+	if pctx.Results[0].Error != nil {
+		t.Errorf("stored result error = %v, want nil", pctx.Results[0].Error)
+	}
+}
+
+// TestExecuteStep_RequireToolCall_NotSatisfied_OverridesSelfReportedPass is
+// the regression test for the actual bug this gate exists to catch: an
+// agent that never runs the tool it was told to, but still reports success
+// in its own final answer. The gate must force the step to fail regardless.
+func TestExecuteStep_RequireToolCall_NotSatisfied_OverridesSelfReportedPass(t *testing.T) {
+	bus := telemetry.NewEventBus(16)
+	reg := tools.NewToolRegistry()
+	reg.RegisterTool(newMockTool("sh", "ok"))
+	// Agent never calls sh at all — goes straight to a claimed-PASS answer,
+	// exactly the failure mode observed in practice (an Acceptor-style agent
+	// reasoning about source code instead of executing the built program).
+	provider := newSequenceProvider(
+		llm.GenerateResult{Response: "OVERALL: PASS", FinishReason: "stop"},
+	)
+	ag := NewAgent(&config.AgentDefinition{Name: "worker", Role: "worker", Tools: []string{"sh"}}, provider, reg, bus, nil)
+	o := newTestOrchestrator(nil, map[string]*Agent{"worker": ag})
+	o.eventBus = bus
+
+	step := config.PipelineStep{
+		Name: "accept", Agent: "worker", Task: "verify",
+		RequireToolCall: &config.RequireToolCallGate{Tool: "sh", CommandContains: "node dist/index.js"},
+	}
+	pctx := newPipelineContext("q")
+
+	_, err := o.executeStep(context.Background(), step, pctx)
+	if err == nil {
+		t.Fatal("expected the gate to fail the step even though the agent self-reported PASS")
+	}
+	if !strings.Contains(err.Error(), "accept") || !strings.Contains(err.Error(), "sh") {
+		t.Errorf("expected error to name the step and the required tool, got: %v", err)
+	}
+	if pctx.Results[0].Error == nil {
+		t.Error("stored result error = nil, want the gate's error recorded")
+	}
+}
+
+// TestExecuteStep_RequireToolCall_RunErrors_ReleasesRunID is the regression
+// test for a map-entry leak: when a gated step's runner.Run itself fails,
+// executeSequentialStep used to
+// return before checkRequireToolCall ever ran — meaning ToolCallsForRun,
+// the only thing that deletes a run ID's map entry, was never called. A
+// persistently failing agent would leak one entry per attempt for the life
+// of the process. Here the agent records a tool call, then the provider
+// errors on the next turn — Run() fails, and toolCallsByRun must still end
+// up empty.
+func TestExecuteStep_RequireToolCall_RunErrors_ReleasesRunID(t *testing.T) {
+	bus := telemetry.NewEventBus(16)
+	reg := tools.NewToolRegistry()
+	reg.RegisterTool(newMockTool("sh", "ok"))
+	provider := &errorProvider{
+		responses: []llm.GenerateResult{
+			{ToolCalls: []llm.ToolCall{{ID: "c1", Name: "sh", Arguments: map[string]interface{}{"cmd": "ls"}}}, FinishReason: "tool_calls"},
+		},
+		err: errors.New("boom"),
+	}
+	ag := NewAgent(&config.AgentDefinition{Name: "worker", Role: "worker", Tools: []string{"sh"}}, provider, reg, bus, nil)
+	o := newTestOrchestrator(nil, map[string]*Agent{"worker": ag})
+	o.eventBus = bus
+
+	step := config.PipelineStep{
+		Name: "accept", Agent: "worker", Task: "verify",
+		RequireToolCall: &config.RequireToolCallGate{Tool: "sh"},
+	}
+	pctx := newPipelineContext("q")
+
+	if _, err := o.executeStep(context.Background(), step, pctx); err == nil {
+		t.Fatal("expected the Run itself to fail (errorProvider errors after the first tool call)")
+	}
+
+	if n := len(ag.toolCallsByRun); n != 0 {
+		t.Errorf("toolCallsByRun has %d leftover entries after a failed Run, want 0 — the run ID must be released even when Run() itself errors, not just on a successful gate check", n)
+	}
+}
+
+// TestCheckRequireToolCall_RunnerWithoutReporter_FailsClosed verifies a
+// Runner that doesn't implement ToolCallReporter (e.g. a nested
+// *Orchestrator reached via a pipeline step's agent:, or any other non-
+// *Agent Runner) fails the gate rather than silently passing it — the gate
+// can't be verified for it, and require_tool_call must never be satisfiable
+// by trust alone.
+type toolCallReporterlessRunner struct{}
+
+func (toolCallReporterlessRunner) Run(context.Context, string) (string, error) { return "PASS", nil }
+func (toolCallReporterlessRunner) GetName() string                             { return "r" }
+func (toolCallReporterlessRunner) GetRole() AgentRole                          { return "worker" }
+func (toolCallReporterlessRunner) GetTools() []string                          { return nil }
+func (toolCallReporterlessRunner) SetDebugController(*debug.DebugController)   {}
+
+func TestCheckRequireToolCall_RunnerWithoutReporter_FailsClosed(t *testing.T) {
+	step := config.PipelineStep{
+		Name:            "s",
+		RequireToolCall: &config.RequireToolCallGate{Tool: "sh"},
+	}
+	err := checkRequireToolCall(step, toolCallReporterlessRunner{}, 0)
+	if err == nil {
+		t.Fatal("expected fail-closed (non-nil error) for a Runner without ToolCallReporter, got nil")
+	}
+	if !strings.Contains(err.Error(), "s") || !strings.Contains(err.Error(), "sh") {
+		t.Errorf("error should name the step and required tool, got: %v", err)
+	}
+}
+
+func TestCheckRequireToolCall_NoGate_AlwaysNil(t *testing.T) {
+	step := config.PipelineStep{Name: "s"}
+	if err := checkRequireToolCall(step, toolCallReporterlessRunner{}, 0); err != nil {
+		t.Errorf("expected nil error when step has no require_tool_call gate, got: %v", err)
+	}
+}
+
+// ============================================================
+// require_tool_call argument-matching tests: matching against ANY
+// string-valued argument let an unrelated field like
+// a path or metadata value satisfy command_contains without the actual
+// command ever running)
+// ============================================================
+
+// TestCommandArgValue_SingleStringArg_NoArgKey_Matches covers the common
+// case (a single-parameter tool like "sh"): with no arg_key configured, the
+// one string-valued argument is used.
+func TestCommandArgValue_SingleStringArg_NoArgKey_Matches(t *testing.T) {
+	call := llm.ToolCall{Name: "sh", Arguments: map[string]interface{}{"cmd": "node dist/index.js"}}
+	got, ok := commandArgValue(call, "")
+	if !ok || got != "node dist/index.js" {
+		t.Fatalf("commandArgValue = (%q, %v), want (\"node dist/index.js\", true)", got, ok)
+	}
+}
+
+// TestCommandArgValue_MultipleStringArgs_NoArgKey_DoesNotMatch is the direct
+// regression test for the MAJOR finding: a call with more than one
+// string-valued argument (e.g. a path AND a command) must not be checked
+// against an arbitrary one of them — that let an unrelated field silently
+// satisfy the gate. Without arg_key, such a call is simply not matchable.
+func TestCommandArgValue_MultipleStringArgs_NoArgKey_DoesNotMatch(t *testing.T) {
+	call := llm.ToolCall{Name: "sh", Arguments: map[string]interface{}{
+		"cmd":  "ls",
+		"path": "/tmp/node dist/index.js.bak", // contains the target substring, but isn't the command
+	}}
+	if _, ok := commandArgValue(call, ""); ok {
+		t.Fatal("commandArgValue matched a call with multiple string args and no arg_key — should be ambiguous, not matched")
+	}
+}
+
+// TestCommandArgValue_ArgKeySet_OnlyChecksThatKey verifies arg_key scopes
+// the check to exactly one named argument, ignoring an unrelated field that
+// happens to contain the target substring.
+func TestCommandArgValue_ArgKeySet_OnlyChecksThatKey(t *testing.T) {
+	call := llm.ToolCall{Name: "sh", Arguments: map[string]interface{}{
+		"cmd":  "ls",
+		"note": "node dist/index.js", // decoy — must be ignored when arg_key is set
+	}}
+	got, ok := commandArgValue(call, "cmd")
+	if !ok || got != "ls" {
+		t.Fatalf("commandArgValue(argKey=cmd) = (%q, %v), want (\"ls\", true)", got, ok)
+	}
+	if _, ok := commandArgValue(call, "missing"); ok {
+		t.Error("commandArgValue(argKey=missing) matched, want false — key isn't present")
+	}
+}
+
+// TestExecuteStep_RequireToolCall_UnrelatedFieldMatch_DoesNotSatisfyGate is
+// the end-to-end regression test: an agent that runs a DIFFERENT command
+// than required, but whose call happens to carry the target substring in
+// an unrelated argument, must still fail the gate.
+func TestExecuteStep_RequireToolCall_UnrelatedFieldMatch_DoesNotSatisfyGate(t *testing.T) {
+	bus := telemetry.NewEventBus(16)
+	reg := tools.NewToolRegistry()
+	reg.RegisterTool(newMockTool("sh", "ok"))
+	provider := newSequenceProvider(
+		llm.GenerateResult{
+			ToolCalls: []llm.ToolCall{{ID: "c1", Name: "sh", Arguments: map[string]interface{}{
+				"cmd":  "ls",
+				"note": "verifying node dist/index.js works", // decoy field, not the command
+			}}},
+			FinishReason: "tool_calls",
+		},
+		llm.GenerateResult{Response: "OVERALL: PASS", FinishReason: "stop"},
+	)
+	ag := NewAgent(&config.AgentDefinition{Name: "worker", Role: "worker", Tools: []string{"sh"}}, provider, reg, bus, nil)
+	o := newTestOrchestrator(nil, map[string]*Agent{"worker": ag})
+	o.eventBus = bus
+
+	step := config.PipelineStep{
+		Name: "accept", Agent: "worker", Task: "verify",
+		RequireToolCall: &config.RequireToolCallGate{Tool: "sh", CommandContains: "node dist/index.js"},
+	}
+	pctx := newPipelineContext("q")
+
+	_, err := o.executeStep(context.Background(), step, pctx)
+	if err == nil {
+		t.Fatal("expected the gate to fail: the actual command run (ls) doesn't match, even though an unrelated field contains the target text")
+	}
+}
 
 func TestParallelStep_AllFast_Success(t *testing.T) {
 	bus := telemetry.NewEventBus(32)

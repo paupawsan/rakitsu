@@ -653,6 +653,31 @@ orchestrator:
 | `max_iterations` | int | Maximum loop iterations (for `loop` type) |
 | `condition_agent` | string | Agent that evaluates the loop condition (for `loop` type) |
 | `condition_prompt` | string | Prompt for the condition agent (for `loop` type) |
+| `require_tool_call` | RequireToolCallGate | Mechanical gate: fails the step if its agent never actually invoked the named tool |
+
+**RequireToolCallGate:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `tool` | string | **Required.** Tool name the step's agent must have called at least once |
+| `command_contains` | string | Optional substring the checked argument must contain |
+| `arg_key` | string | Which argument `command_contains` is checked against. If unset, the gate only matches a call with exactly one string-valued argument — a call with zero or several is treated as not matching rather than guessed at, so `command_contains` can never be satisfied by an unrelated field (a path, an env value, metadata) |
+
+An agent can hallucinate or self-report success without ever running the tool a
+step actually requires. `require_tool_call` overrides that self-report: after
+the step's agent finishes, the pipeline checks whether it really made a
+matching tool call and fails the step outright if not, regardless of the
+agent's own final answer or a loop's `condition_agent` verdict.
+
+```yaml
+pipeline:
+  steps:
+    - name: "accept"
+      agent: "Acceptor"
+      task: "Verify every acceptance item against the running program."
+      require_tool_call:
+        tool: "sh"
+```
 
 **Step types:**
 

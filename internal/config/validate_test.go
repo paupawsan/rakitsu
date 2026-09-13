@@ -113,6 +113,47 @@ func TestValidate_PipelineStepReferencesUnknownAgent(t *testing.T) {
 	}
 }
 
+func TestValidate_PipelineStepRequireToolCallMissingTool(t *testing.T) {
+	cfg := Config{
+		Agents: []AgentDefinition{{Name: "Worker"}},
+		Orchestrator: &OrchestratorConfig{
+			Name:   "Lead",
+			Agents: []string{"Worker"},
+			Pipeline: &PipelineConfig{
+				Steps: []PipelineStep{
+					{Name: "s1", Agent: "Worker", RequireToolCall: &RequireToolCallGate{}},
+				},
+			},
+		},
+	}
+	errs := cfg.Validate()
+	if len(errs) == 0 {
+		t.Fatal("expected error for require_tool_call with no tool name")
+	}
+	if !strings.Contains(errs[0].Field, "require_tool_call") {
+		t.Errorf("expected error field to reference require_tool_call, got %q", errs[0].Field)
+	}
+}
+
+func TestValidate_PipelineStepRequireToolCallWithTool_NoError(t *testing.T) {
+	cfg := Config{
+		Agents: []AgentDefinition{{Name: "Worker"}},
+		Orchestrator: &OrchestratorConfig{
+			Name:   "Lead",
+			Agents: []string{"Worker"},
+			Pipeline: &PipelineConfig{
+				Steps: []PipelineStep{
+					{Name: "s1", Agent: "Worker", RequireToolCall: &RequireToolCallGate{Tool: "sh", CommandContains: "node dist/index.js"}},
+				},
+			},
+		},
+	}
+	errs := cfg.Validate()
+	if len(errs) != 0 {
+		t.Fatalf("expected no error for a valid require_tool_call gate, got %v", errs)
+	}
+}
+
 func TestValidate_NestedParallelStepReferences(t *testing.T) {
 	cfg := Config{
 		Agents: []AgentDefinition{{Name: "A"}, {Name: "B"}},
