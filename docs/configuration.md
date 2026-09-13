@@ -87,9 +87,13 @@ project/
 │   └── security-audit.md
 ├── tools/                # Auto-discovered tool definitions
 │   └── list-files.yaml
+├── orchestrators/        # Auto-discovered orchestrator definitions
+│   └── tech-lead.yaml
 └── prompts/              # Referenced by file: or auto-detect
     └── reviewer-prompt.md
 ```
+
+`orchestrators/` YAML files (`.yaml`/`.yml`) each contain one OrchestratorConfig, appended to the config's `orchestrators` list. Same precedence rule as agents/skills/tools: an inline `orchestrators` entry with the same name as one discovered from the directory takes precedence.
 
 ### Supported File Formats
 
@@ -184,7 +188,6 @@ settings:
   server:
     host: "localhost"
     port: 8080
-    websocket_path: "/ws"
 ```
 
 ### Settings Fields
@@ -199,6 +202,80 @@ settings:
 | `projects` | map[string]string | Cloud project ID per provider (e.g., `gemini: "my-gcp-project"` for Vertex AI) |
 | `providers` | map[string]ProviderDefinition | Named provider instances (see below) |
 | `allowed_commands` | []string | User-defined commands allowed for CLI tools (extends the built-in allowlist). A denylist (`rm`, `sudo`, `kill`, …) blocks those exact names, but this is **not** a security boundary — allowed interpreters like `python3`/`bash` can still run arbitrary code. Only add commands you trust; see [SECURITY.md](SECURITY.md). |
+| `hub_url` | string | SSE hub URL for `rakitsu run` (overridden by `--hub` flag) |
+| `retry` | RetrySettings | LLM call retry behaviour (see below) |
+| `memory` | MemoryConfig | Native memory / knowledge-graph store (see below) |
+| `spawn` | SpawnConfig | `spawn_agent` tool: runtime subagent fan-out (see below) |
+| `agent_chat` | AgentChatConfig | Directed agent chat: talking to one agent in a multi-agent run (see below) |
+| `session_msg` | SessionMsgConfig | Cross-session messaging gate (see below) |
+
+### RetrySettings
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_attempts` | int | 3 | Max retry attempts |
+| `base_delay` | string | `"1s"` | Initial backoff duration, e.g. `"2s"` |
+| `max_delay` | string | `"16s"` | Max backoff duration, e.g. `"30s"` |
+
+### MemoryConfig
+
+Enables rakitsu's native memory / knowledge-graph store.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable native memory |
+| `dir` | string | `~/.rakitsu/memory` | Storage directory |
+| `conversation` | ConversationMemoryConfig | | Summarized-context chat mode (see below) |
+| `auto_recall` | AutoRecallConfig | | Auto-inject top-k relevant memories at Run start (see below) |
+
+#### ConversationMemoryConfig
+
+Switches chat surfaces from full-history re-feed to a rolling summary + recent verbatim turns (bounded per-turn context). The summary is maintained by a post-turn summarizer inference and persisted in the session scope, so resume keeps the compressed context. Turns are only dropped from the model-visible window once they have been folded into the summary — a summarizer failure degrades to full history, never data loss.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable conversation memory mode |
+| `keep_recent_turns` | int | 2 | Verbatim turns kept per inference |
+| `summary_max_chars` | int | 2000 | Rolling summary size cap |
+| `disable_summary` | bool | `false` | Pure-memory mode: turns past the verbatim window are dropped without a summarizer inference, so context older than `keep_recent_turns` is recoverable only via the memory/KG tools. Trades the loss-safety invariant for zero summarizer cost and a strictly flat per-turn context. |
+
+#### AutoRecallConfig
+
+Injects the top-k memories relevant to each turn's query into the model's context at Run start, so facts surface even when a weak model never calls `memory_query`. Opt-in; gated on `MemoryConfig.enabled`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable auto-recall |
+| `top_k` | int | 5 | Number of memories to inject |
+| `scopes` | []string | session→project→global cascade | Overrides the default cascade. Entries may be shorthands (`session`, `project`, `global`) or literals (`project:foo`) |
+| `node_type` | string | all types | Restricts recall to one type: `rule`, `pattern`, `fact`, `procedure`, `gotcha`, `note` |
+
+### SpawnConfig
+
+Enables the `spawn_agent` tool: runtime subagent fan-out.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable `spawn_agent` |
+| `max_concurrent` | int | 4 | Run-global cap on concurrent spawned agents |
+| `max_depth` | int | 1 | Max spawn depth (default: children cannot spawn) |
+| `timeout_seconds` | int | 300 | Per-child timeout |
+
+### AgentChatConfig
+
+Configures directed agent chat: talking to one agent in a multi-agent run.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | *bool | on when omitted | Tri-state: defaults ON when omitted from config |
+| `max_retained` | int | 20 | Max retained transcript turns; `-1` = retain nothing |
+| `max_transcript_bytes` | int | 262144 (256KiB) | Transcript size cap |
+
+### SessionMsgConfig
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Gates cross-session messaging for a session |
 
 ### Named Providers
 
@@ -226,22 +303,26 @@ settings:
 | `credentials_file` | string | Service account JSON path (Gemini) or `auth.json` path (`codex`, default `~/.codex/auth.json`) |
 | `location` | string | Cloud region (Vertex AI) |
 | `project` | string | Cloud project ID (Vertex AI) |
+| `default_model` | string | Default model for this provider; falls back behind `agent.model`, ahead of `settings.defaults.model` |
+| `response_format` | string | Optional adapter override: `standard_openai`, `reasoning_content_field`. Empty = auto-detect from model name |
+| `rate_limit` | int | Max requests per minute to this provider (0 = unlimited) |
+| `reasoning_effort` | string | OpenAI `reasoning_effort` sent on every request (`none`, `minimal`, `low`, `medium`, `high`); GPT-5.6 models require it with tools |
 
 ### Defaults
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `model` | string | `gpt-4o-mini` | Default model name |
-| `temperature` | float | 0.7 | Sampling temperature (0.0-2.0) |
-| `max_tokens` | int | 4096 | Maximum response tokens |
+| `model` | string | `gpt-4o-mini` | Default model name. Only applied as a last resort when no explicit model, `provider.default_model`, or `settings.defaults.model` is set anywhere — see the resolution chain in `createLLMProvider` (`cmd/rakitsu/run.go`). Not a config-level default in the viper sense. |
+| `temperature` | float | *(none)* | Sampling temperature (0.0-2.0). **Not defaulted anywhere in code** — when left unset (0), it's passed through as-is to the provider, which then applies its own API default (typically 1.0 for OpenAI-compatible APIs), not 0.7. |
+| `max_tokens` | int | *(provider-dependent)* | Maximum response tokens. **Not a config-level default** — when unset (0), the Anthropic provider internally falls back to 4096 (`internal/llm/anthropic/provider.go`); the OpenAI and Gemini providers pass 0/unset through and rely on the API's own default. |
 
 ### Execution
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `max_iterations` | int | 10 | Max ReAct loop iterations |
-| `timeout_seconds` | int | 300 | Execution timeout |
-| `retry_attempts` | int | 3 | Retry count on failure |
+| `max_iterations` | int | 10 | Max ReAct loop iterations (`internal/agent/agent.go`) |
+| `timeout_seconds` | int | 300 | Execution timeout — this is the `--timeout`/`-t` CLI flag's default; setting `execution.timeout_seconds` overrides it (`cmd/rakitsu/run.go`) |
+| `retry_attempts` | int | **5**, not 3 | Retry count on failure. When `settings.retry.max_attempts` and this legacy field are both unset, the actual default is 5 attempts (`internal/agent/retry.go`'s `defaultRetryConfig`), not 3 |
 | `max_total_tokens` | int | 0 | Hard token budget across all agents (0 = unlimited) |
 | `max_cost` | float | 0 | Hard cost budget in USD across all agents (0 = unlimited) |
 
@@ -269,18 +350,21 @@ settings:
 
 ### Logging
 
+**Currently a no-op:** `settings.logging` is parsed into config but nothing in the codebase reads it — setting `level` or `file` has no effect today.
+
 | Field | Type | Description |
 |-------|------|-------------|
-| `level` | string | Log level: `debug`, `info`, `warn`, `error` |
-| `file` | string | Log file path |
+| `level` | string | Log level: `debug`, `info`, `warn`, `error` (not currently consulted anywhere) |
+| `file` | string | Log file path (not currently consulted anywhere) |
 
 ### Server
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `host` | string | `localhost` | Server bind address |
-| `port` | int | 8080 | Server port |
-| `websocket_path` | string | `/ws` | WebSocket endpoint path |
+**Currently a no-op:** `settings.server` is parsed into config but `rakitsu serve` reads its bind address/port from its own `--host`/`--port` CLI flags, not from this block. Those flags default to `localhost:9100`, not `localhost:8080`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `host` | string | Server bind address (not currently consulted anywhere; see `rakitsu serve --host`) |
+| `port` | int | Server port (not currently consulted anywhere; see `rakitsu serve --port`) |
 
 ## Tools
 
@@ -346,6 +430,7 @@ tools:
 | `agent` | string | Remote agent name to delegate to (for `a2a` type) |
 | `allowed_exit_codes` | []int | Acceptable exit codes |
 | `sandbox` | SandboxConfig | Security sandbox configuration |
+| `api_key` | string | Authenticates against a peer's `/a2a` endpoint (`RAKITSU_API_TOKEN` or any bearer token an A2A server requires) — sent as `Authorization: Bearer <api_key>`. Supports `${ENV_VAR}` expansion, same as provider `api_key` values |
 
 ### Parameter
 
@@ -450,12 +535,14 @@ agents:
 | `name` | string | **Required.** Unique agent name |
 | `role` | string | Agent role: `worker`, `supervisor` |
 | `provider` | string | LLM provider (overrides `settings.default_provider`) |
+| `providers` | []ProviderEntry | Ordered fallback chain; overrides `provider` when non-empty |
 | `model` | string | Model name (overrides `settings.defaults.model`) |
 | `model_config` | ModelConfig | Per-agent model parameters |
 | `system_prompt` | string | System prompt (supports [file references](#file-references)) |
 | `tools` | []string | Tool names this agent can use |
 | `skills` | []string | Skill names this agent can use |
 | `tools_inline` | ToolDefinition[] | Agent-specific inline tool definitions |
+| `vision` | bool | Agent accepts image inputs |
 | `settings` | AgentSettings | Agent behavior settings |
 
 ### ModelConfig
@@ -469,8 +556,11 @@ Per-agent model parameter overrides.
 | `top_p` | float | Nucleus sampling parameter |
 | `frequency_penalty` | float | Frequency penalty (-2.0 to 2.0) |
 | `presence_penalty` | float | Presence penalty (-2.0 to 2.0) |
-| `timeout_sec` | int | Per-request LLM timeout in seconds |
+| `timeout_sec` | int | Per-request LLM timeout in seconds (sent as `X-LiteLLM-Timeout` header) |
 | `no_stream_tools` | bool | Disable streaming when tools are present. Required for some providers (vLLM, Qwen via LiteLLM) that don't support streaming with tool definitions. |
+| `max_thinking_tokens` | int | Anthropic extended thinking budget cap (must be >=1024) |
+| `thinking_offload` | bool | Strip thinking from history and store externally |
+| `reasoning_effort` | string | Per-agent OpenAI `reasoning_effort` override (wins over the provider's) |
 
 ### AgentSettings
 
@@ -484,6 +574,16 @@ Per-agent model parameter overrides.
 | `reflection` | ReflectionConfig | disabled | Self-reflection configuration |
 | `ground_check` | GroundCheckConfig | disabled | Ground-check validation |
 | `context` | ContextConfig | `strategy: "full"` | Context management strategy |
+| `rollback` | RollbackConfig | disabled | Self-correction: undo and retry after a tool error or repeated failure (see below) |
+
+### RollbackConfig
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable rollback |
+| `max_rollbacks` | int | 3 | Cap on rollbacks per Run |
+| `triggers` | []string | `["tool_error"]` | Conditions that trigger a rollback: `tool_error`, `repeated_tool_failure` |
+| `llm_self_judge` | bool | `false` | Let the LLM judge whether to roll back, instead of relying only on mechanical triggers |
 
 ### ContextConfig
 
@@ -504,11 +604,16 @@ agents:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `strategy` | string | `full` | Context strategy: `full`, `sliding_window`, `step_log` |
-| `window_size` | int | 0 | Number of recent turns to keep (for `sliding_window`). Snaps to turn boundaries. |
-| `keep_recent` | int | 3 | Number of recent steps to include verbatim (for `step_log`). Older steps get one-line summaries. |
+| `strategy` | string | `full` | Context strategy: `full`, `sliding_window`, `step_log`, `auto` |
+| `window_size` | int | 20 | Number of recent turns to keep (for `sliding_window`/`auto`). Only applied when unset AND the resolved strategy is `sliding_window` or `auto`; otherwise 0. Snaps to turn boundaries. |
+| `keep_recent` | int | 3 | Number of recent steps to include verbatim (for `step_log`/`auto`). Only applied when unset AND the resolved strategy is `step_log` or `auto`; otherwise 0. Older steps get one-line summaries. |
 | `max_tool_output` | int | 0 | Max characters per tool output (0 = unlimited). Longer outputs are truncated. |
 | `fence_outputs` | bool | false | Wrap tool outputs in `<tool_output>` delimiters. Helps the LLM distinguish data from instructions. |
+| `auto_full_threshold` | int | 30 | `auto` strategy: message count before switching from `full` to `sliding_window` |
+| `auto_compress_threshold` | int | 60 | `auto` strategy: message count before switching to `step_log` |
+| `context_budget_threshold` | float | 0.75 | `auto` strategy: token-pressure ratio that triggers `sliding_window` |
+| `context_retrieval_threshold` | float | 0.90 | `auto` strategy: token-pressure ratio that triggers `step_log` |
+| `retrieval` | RetrievalConfig | disabled | Retrieval-augmented context injection (see below) |
 
 **Strategies:**
 
@@ -517,6 +622,18 @@ agents:
 | `full` | Keep entire history (current default). Optional truncation + fencing. | Short runs (< 5 iterations), small tool outputs |
 | `sliding_window` | Keep last N turns, discard older ones. | Medium runs where only recent context matters |
 | `step_log` | Query + one-line summaries of old steps + last N steps verbatim. Summaries are programmatic (not LLM-generated). | Long-running code agents (10+ iterations, large tool outputs) |
+| `auto` | Dynamically shifts between `full`/`sliding_window`/`step_log` based on message count and token-pressure thresholds above. | Runs of unpredictable length where a fixed strategy under- or over-compresses |
+
+#### RetrievalConfig
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable retrieval |
+| `top_k` | int | 5 | Segments injected per turn |
+| `embedding_provider` | string | `""` (BM25) | `""` for BM25, or `ollama` |
+| `embedding_model` | string | | Embedding model name (when `embedding_provider: "ollama"`) |
+| `embedding_url` | string | `http://localhost:11434` | Embedding service URL |
+| `error_bias` | float | 2.0 | Weight multiplier for failed steps |
 
 **Security:** When `fence_outputs: true`, tool outputs are wrapped in delimiters and the system prompt instructs the LLM to treat fenced content as untrusted data. This reduces prompt injection risk from tool outputs (e.g., a file containing "ignore all previous instructions").
 
@@ -581,7 +698,8 @@ orchestrator:
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | **Required.** Orchestrator name |
-| `strategy` | string | Strategy: `ReAct`, `PlanAndExecute`, `Hierarchical`, `Pipeline` |
+| `role` | string | Orchestrator role |
+| `strategy` | string | Strategy: `ReAct`, `PlanAndExecute`, `Hierarchical`, `Pipeline`. Only `Pipeline` has a distinct implementation today — see SYSTEM-SPEC.md §6 |
 | `provider` | string | LLM provider |
 | `model` | string | Model name |
 | `model_config` | ModelConfig | Model parameter overrides |
@@ -639,7 +757,15 @@ orchestrator:
             agent: "Reviewer"
           - name: "security_check"
             agent: "Security"
+    synthesis: true
+    synthesis_prompt: "Summarize all step results into a final report."
 ```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `steps` | PipelineStep[] | **Required.** Ordered pipeline steps |
+| `synthesis` | bool | Make a final LLM call to summarize all step results |
+| `synthesis_prompt` | string | Custom prompt for synthesis (optional; a default is used when `synthesis: true` and this is unset) |
 
 ### PipelineStep
 
@@ -653,6 +779,8 @@ orchestrator:
 | `max_iterations` | int | Maximum loop iterations (for `loop` type) |
 | `condition_agent` | string | Agent that evaluates the loop condition (for `loop` type) |
 | `condition_prompt` | string | Prompt for the condition agent (for `loop` type) |
+| `timeout_sec` | int | Per-step timeout in seconds |
+| `depends_on` | []string | Names of steps that must complete before this one starts |
 | `require_tool_call` | RequireToolCallGate | Mechanical gate: fails the step if its agent never actually invoked the named tool |
 
 **RequireToolCallGate:**

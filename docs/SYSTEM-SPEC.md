@@ -1,6 +1,6 @@
 # Rakitsu System Specification
 
-**Version**: v0.2.0-alpha.3
+**Version**: v0.3.0-alpha.3 (see `Makefile` `VERSION_CORE` / latest git tag for current)
 **Stack**: Go 1.25 + Vue 3 / Vite 7 / TypeScript 5.9
 **Module**: `github.com/paupawsan/rakitsu`
 
@@ -114,7 +114,22 @@ graph LR
 
 ## 2. Architecture Diagram
 
-### Full System Architecture
+### Core Runtime Architecture
+
+The diagram below covers the core execution path (CLI → agent engine → LLM/tools → telemetry/server → frontend), not every package under `internal/`. Supporting packages not shown here:
+
+| Package | Purpose |
+|---------|---------|
+| `chat/` | Rich terminal UI for interactive agent sessions |
+| `agentchat/` | Directed agent chat: addressing one agent in a multi-agent run |
+| `tokenizer/` | Token counting / estimation |
+| `brand/` | Terminal brand mark and accent color |
+| `turntree/` | Tree of conversation turns for resume + fork-on-past-turn |
+| `export/` | Converts rakitsu configs to external agent runtime formats (OpenClaw, NemoClaw) |
+| `scaffold/` | Use-case preset templates for `rakitsu scaffold` |
+| `acp/` | ACP (Agent Client Protocol) server for the `acp` command |
+| `session/` | Read-only abstraction over every live execution |
+| `license/` | Commercial license-key activation, hardware fingerprinting (pro builds only, build-tag gated) |
 
 ```mermaid
 graph TD
@@ -144,6 +159,13 @@ graph TD
         subgraph ToolsPkg["tools/"]
             cli["cli/\n(shell)"]
             fs["fs/\n(filesystem)"]
+            mcp["mcp/\n(mcp_server client)"]
+            a2a["a2a/\n(a2a client)"]
+            userinput["userinput/\n(user_input)"]
+            memtool["memory/\n(memory_* tools)"]
+            sessionmsg["sessionmsg/\n(send_message)"]
+            chathost["chathost/\n(chat-host meta-agent)"]
+            spawn["spawn/\n(spawn_agent)"]
             toolreg["tool.go\nRegistry"]
         end
 
@@ -225,8 +247,10 @@ graph TD
 │                                                             │
 │  ┌────────────────────┐  ┌──────────────────────────────┐  │
 │  │  llm/              │  │  tools/                      │  │
-│  │  openai/ anthropic │  │  cli/ (shell)                │  │
-│  │  gemini/ provider  │  │  fs/ (filesystem)            │  │
+│  │  openai/ anthropic │  │  cli/ (shell)  fs/ (filesystem)│ │
+│  │  gemini/ provider  │  │  mcp/ (mcp_server)  a2a/ (a2a)│  │
+│  │                    │  │  userinput/  memory/  spawn/  │  │
+│  │                    │  │  sessionmsg/  chathost/       │  │
 │  └────────────────────┘  └──────────────────────────────┘  │
 │                                                             │
 │  ┌────────────────────┐  ┌──────────────────────────────┐  │
@@ -319,6 +343,20 @@ Kept for backward compatibility; `serve` now includes the full web UI + runner.
 ### `rakitsu acp <config.yaml>`
 
 Run as an ACP (Agent Client Protocol) stdio server — the mechanism editors like Zed use to talk to rakitsu agents directly. See §14.
+
+### `rakitsu sessions live` / `rakitsu sessions send`
+
+Cross-session messaging: send a fire-and-forget message into another live session, gated by `settings.session_msg.enabled`.
+
+| Command | Description |
+|---------|-------------|
+| `rakitsu sessions live` | List live sessions reachable for cross-session messaging |
+| `rakitsu sessions send <session-id> <text>` | Send a fire-and-forget message into a live session |
+
+| Flag | Default | Applies to | Description |
+|------|---------|------------|-------------|
+| `--hub URL` | `http://localhost:9100` | both | Hub/server URL |
+| `--from-name NAME` | `"CLI"` | `send` | Sender name shown in the target session |
 
 ---
 
@@ -556,8 +594,28 @@ On low confidence:
 |----------|---------|-------------|----------|
 | **ReAct** | LLM-driven | Non-deterministic | Open-ended tasks |
 | **Pipeline** | Config-driven | Deterministic | Structured workflows |
-| **Hierarchical** | Hybrid | Semi-deterministic | Large projects |
-| **PlanAndExecute** | LLM-planned | Semi-deterministic | Complex multi-step |
+| **Hierarchical** | *(alias, see below)* | Non-deterministic | Large projects |
+| **PlanAndExecute** | *(alias, see below)* | Non-deterministic | Complex multi-step |
+
+`orchestrator.Run`'s strategy switch only distinguishes `Pipeline`; every
+other value, including `Hierarchical` and `PlanAndExecute`, currently falls
+through to the same `runReAct` implementation (`internal/agent/orchestrator.go`):
+
+```go
+switch o.strategy {
+case "Pipeline":
+    return o.runPipeline(ctx, query)
+default: // "ReAct", "PlanAndExecute", "Hierarchical"
+    return o.runReAct(ctx, query)
+}
+```
+
+`Hierarchical` does get a thin variant on top of ReAct — a synthesized
+supervisor agent (`OrchestratorConfig.Role`, see `internal/config/config.go`)
+— but it is not a structurally distinct strategy the way `Pipeline` is.
+`PlanAndExecute` has no distinct behavior at all yet: setting it is
+equivalent to `ReAct`. Only `ReAct` and `Pipeline` are real, separately
+implemented `strategy:` values today.
 
 ### Pipeline Execution Timeline
 
@@ -960,6 +1018,27 @@ flowchart LR
 | `TOKEN_CHUNK` | Streaming token | content |
 | `REPLAY_START` | Replay begins | session_id |
 | `REPLAY_END` | Replay ends | — |
+| `RETRY_ATTEMPT` | LLM call retried | — |
+| `CONTEXT_COMPRESSED` | Context auto-compressed | — |
+| `RETRIEVAL_INJECTED` | Retrieved context injected | — |
+| `FORMAT_SELECTED` | Output format selected | — |
+| `SALVAGED_OUTPUT` | Failed run's partial output salvaged | — |
+| `WORKER_REDELEGATION_BLOCKED` | Supervisor's re-delegation to a worker blocked (per-worker post-salvage cap reached) | — |
+| `MODEL_CHANGED` | Agent's provider/model swapped at runtime (e.g. `/model`) | — |
+| `REASONING_CHUNK` | Streaming reasoning_content delta (peer to `TOKEN_CHUNK`, kept separate from the visible answer stream) | content |
+| `USER_INPUT_PENDING` | Agent calls `user_input` tool, blocks for a human answer | — |
+| `USER_INPUT_ANSWERED` | `user_input` tool receives its answer | — |
+| `CHAT_TURN_START` | Chat turn begins (groups a turn's events under one node) | — |
+| `CHAT_TURN_END` | Chat turn settles (answer, cancellation, or error) | — |
+| `SESSION_END` | Final event written to the session JSONL by `SessionStore.EndSession`. JSONL-only — not published to the EventBus/SSE stream | status, total_events, total_tokens, duration_ms |
+| `ROLLBACK` | Agent rewinds conversation history after detecting a dead-end iteration (per `RollbackConfig` triggers) | — |
+| `MEMORY_WRITE` | Agent writes to the native memory/knowledge-graph store | — |
+| `MEMORY_RECALL` | Agent reads from the native memory store | — |
+| `DIRECT_CHAT_START` | User messages one agent directly, outside the main conversation (directed agent chat) | — |
+| `DIRECT_CHAT_END` | Directed agent chat turn settles | — |
+| `SESSION_MSG_SENT` | Cross-session message delivery attempted (send_message tool, CLI, web UI) | — |
+| `SESSION_MSG_RECEIVED` | Receiving session accepts a cross-session message into its turn queue | — |
+| `MEDIA_ATTACHED` | File loaded via `--attach` | — |
 
 ### Event Timeline (Example Run)
 
@@ -996,6 +1075,7 @@ AgentEndPayload {
   TotalCost   float64 // USD (if pricing configured)
   MaxTokens   int     // configured limit
   MaxCost     float64 // configured limit
+  PricingKnown bool   // true iff settings.pricing (or a built-in default) had an entry for this model
 }
 ```
 
@@ -1434,10 +1514,10 @@ make clean              # Remove build artifacts
 ```bash
 # Format: v{major}.{minor}.{patch}-alpha.{N}.{build}
 # ({build} is branch-aware: short commit hash on main, commit count elsewhere)
-make build VERSION=v0.2.0-alpha.3
+make build VERSION=v0.3.0-alpha.3
 
 # Runtime output:
-rakitsu version v0.2.0-alpha.3.30132e9
+rakitsu version v0.3.0-alpha.3.30132e9
 ```
 
 ### Project Structure
@@ -1468,7 +1548,14 @@ rakitsu/
 │   ├── tools/              # Tool interface + implementations
 │   │   ├── tool.go         # Interface + registry
 │   │   ├── cli/            # Shell command tool
-│   │   └── fs/             # Filesystem tool
+│   │   ├── fs/             # Filesystem tool
+│   │   ├── mcp/            # mcp_server client tool
+│   │   ├── a2a/            # a2a client tool
+│   │   ├── userinput/      # user_input tool
+│   │   ├── memory/         # memory_* tools
+│   │   ├── sessionmsg/     # send_message tool
+│   │   ├── chathost/       # chat-host meta-agent
+│   │   └── spawn/          # spawn_agent tool
 │   ├── telemetry/          # Events, bus, tracer, forwarder
 │   ├── server/             # HTTP server, SSE, hub, runner
 │   ├── debug/              # Debug controller, replay, export
